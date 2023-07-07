@@ -7,3 +7,5 @@
 ## Chapter 1: Pythonic Thinking<a name="Chapter1"></a>
 
 ### Know Which Version of Python You're Using
+
+You can check the version of python you are using by executing `python --version`.
