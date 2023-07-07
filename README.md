@@ -8,4 +8,5 @@
 
 ### Know Which Version of Python You're Using
 
-You can check the version of python you are using by executing `python --version`.
+You can check the version of python you are using by executing `python --version` or `python3 --version` in case of 
+python 3.
