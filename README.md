@@ -312,7 +312,7 @@ else:
     other_func()
 ```
 
-This is a lot more readable because it’s now clear that count is only relevant to the first block of the if statement.
+This is a lot more readable because it's now clear that count is only relevant to the first block of the if statement.
 Another common variation of this repetitive pattern occurs when I need to assign a variable in the enclosing scope
 depending on some condition, and then reference that variable shortly afterward in a function call:
 
@@ -350,6 +350,246 @@ In general, when you find yourself repeating the same expression or assignment m
 lines, consider using assignment expressions in order to improve readability.
 
 ## Chapter 2: Lists and Dictionaries<a name="Chapter2"></a>
+
+### Know How to Slice Sequences
+
+Python includes syntax for slicing sequences into pieces.The simplest uses for slicing are the built-in types _list_,
+_str_, and _bytes_. Slicing can be extended to any Python class that implements the _\__getitem__ and _\__setitem__
+special methods. The basic form of the slicing syntax is `somelist[start:end]`. When slicing from the start of a
+list, you should leave out the zero index to reduce visual noise. When slicing to the end of a list, you should leave
+out the final index because it's redundant. Using negative numbers for slicing is helpful for doing offsets relative to
+the end of a list. Slicing deals properly with start and end indexes that are beyond the boundaries of a list by
+silently omitting missing items, but access a missing index causes an Exception to be thrown.
+
+The result of slicing a list is a whole new list. References to the objects from the original list are maintained. When
+used in assignments, slices replace the specified range in the original list. Unlike unpacking assignments, the lengths
+of slice assignments don't need to be the same. The values before and after the assigned slice will be preserved. Here,
+the list shrinks because the replacement list is shorter than the specified slice:
+
+```python
+a = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+a[2:7] = [99, 22, 14]  # this is  ['a', 'b', 99, 22, 14, 'h']
+```
+
+If you leave out the start and the end indexes when slicing, you end up with a copy of the original list:`b = a[:]`. If
+you assign to a slice with no start or end indexes, you replace the entire contents of the list with a copy of what's
+referenced instead of allocating a new list:
+
+```python
+b = a
+a[:] = [101, 102, 103]  # After this, a and b = [101, 102, 103]
+assert a is b  # Returns True
+```
+
+### Avoid Striding and Slicing in a Single Expression
+
+Python has special syntax for the stride of a slice in the form `somelist[start:end:stride]`. The problem is that the
+stride syntax often causes unexpected behavior that can introduce bugs. For example, you can reverse a string with
+`thestring[::-1]`, but this does not work when Unicode data is encoded as a UTF-8 byte string.
+
+The stride part of the slicing syntax can be extremely confusing, avoid using a stride along with start and end indexes.
+If you must use a stride with start or end indexes, consider using one assignment for striding and another for slicing:
+
+```python
+y = x[::2]  # ['a', 'c', 'e', 'g']
+z = y[1:-1]  # ['c', 'e']
+```
+
+Striding and then slicing creates an extra shallow copy of the data. The first operation should try to reduce the
+size of the resulting slice by as much as possible. If your program can't afford the time or memory required for two
+steps, consider using the itertools built-in module's `islice` method.
+
+### Prefer Catch-All Unpacking Over Slicing
+
+One limitation of basic unpacking is that you must know the length of the sequences you're unpacking in advance. Python
+also supports catch-all unpacking through a starred expression: `first_item, second_item, *others = some_list`.
+A starred expression may appear in any position, so you can get the benefits of catch-all unpacking anytime you need
+to extract one slice: `first_item, *others, last_item = some_list`. To unpack assignments that contain a starred
+expression, you must have at least one required part, or else you'll get a SyntaxError. You can't use a catch-all
+expression on its own: `*others = some_list`. You also can't use multiple catch-all expressions in a single-level
+unpacking pattern: `first, *middle, *second_middle, last = some_list`. But it is possible to use multiple starred
+expressions in an unpacking assignment statement, as long as they're catch-alls for different parts of the multilevel
+structure being unpacked:
+
+```python
+car_inventory = {'Downtown': ('Silver Shadow', 'Pinto', 'DMC'), 'Airport': ('Skyline', 'Viper', 'Gremlin', 'Nova')}
+((loc1, (best1, *rest1)), (loc2, (best2, *rest2))) = car_inventory.items()  # Although not recommended
+```
+
+Starred expressions become list instances in all cases. If there are no leftover items from the sequence being unpacked,
+the catch-all part will be an empty list. You can also unpack arbitrary iterators with the unpacking syntax, but
+keep in mind, however, that because a starred expression is always turned into a list, unpacking an iterator also
+risks the potential of a memory error.
+
+### Sort by Complex Criteria Using the key Parameter
+
+The list built-in type provides a sort method for ordering the items in a list instance based on a variety of criteria
+(defaults to natural ascending order of items). This natural order is defined in the class special methods (_\__lt___).
+The sort method accepts a key parameter that's expected to be a function. The key function is passed a single argument,
+which is an item from the list that is being sorted. The return value of the key function should be a comparable
+value to use in place of an item for sorting purposes: `my_list.sort(key=lambda x: x.attribute_to_sort)`. If you need to
+sort by various criteria (name and age for example), the simplest solution is to use a tuple. Tuples are comparable by
+default and have a natural ordering, meaning that they implement all of the special methods. Tuples implement these
+special method comparators by iterating over each position in the tuple and comparing the corresponding values one index
+at a time. But one limitation of having the key function return a tuple is that the direction of sorting for all
+criteria must be the same: either all in ascending order, or all in descending order. For numerical values it's possible
+to mix sorting directions by using the unary minus operator in the key function. But if the attribute is not numeric,
+you can use the Python's _stable_ sorting algorithm. The sort method of the list type will preserve the order of the
+input list when the key function returns values that are equal to each other. This means that I can call sort multiple
+times on the same list to combine different criteria together:
+
+```python
+my_list.sort(key=lambda x: x.attribute_to_sort2)  # attribute_to_sort ascending
+my_list.sort(key=lambda x: x.attribute_to_sort1, reverse=True)  # attribute_to_sort descending
+```
+
+Make sure that you execute the sorts in the opposite sequence of what you want the final list to contain, only using
+multiple calls to sort if it's absolutely necessary.
+
+### Be Cautious When Relying on dict Insertion Ordering
+
+In Python 3.5 and before, iterating over a dict would return keys in arbitrary order (this applies to all methods
+provided by dict that relied on iteration order, including `keys`, `values`, `items`, `popitem`, `**kwargs` passed
+to functions and the dict type for class instance dictionaries returned by _\__dict___). This happened because the
+dictionary type previously implemented its hash table algorithm with a combination of the hash built-in function and a
+random seed that was assigned when the Python interpreter started. Starting with Python 3.6, and officially part of the
+Python specification in version 3.7, dictionaries will preserve insertion order.
+
+However, you shouldn't always assume that insertion ordering behavior will be present when you're handling dictionaries
+because Python makes it easy for programmers to define their own custom container types that emulate the standard
+protocols matching list, dict, and other types. To mitigate this problem you can write code that doesn't rely on
+insertion ordering, explicitly check for the dict type at runtime, or require dict values using type annotations and
+static analysis.
+
+### Prefer get Over in and KeyError to Handle Missing Dictionary Keys
+
+The three fundamental operations for interacting with dictionaries are accessing, assigning, and deleting keys and
+their associated values. Imagine we want to implement the upsert operation for a counter in a dictionary,we have to
+check for the key existence, insert it with a default value if it doesn't, and increment the value associated with
+the key:
+
+```python
+key = 'key1'
+if key in counters:
+    count = counters[key]
+else:
+    count = 0
+counters[key] = count + 1
+```
+
+Another option is to rely on dictionaries raising a _KeyError_ exception when you try to access an absent key:
+
+```python
+try:
+    count = counters[key]
+except KeyError:
+    count = 0
+counters[key] = count + 1
+```
+
+This upsert flow is so common that python provides a built-in function for this: `count = counters.get(key, 0)`,
+where the second value is the default value to return if the key doesn't exist. A similar case exists if the
+returned value is a collection, for example:
+
+```python
+if (names := my_list.get(key)) is None:  # Assigns to names = my_list.get('key') and returns it to compare to None
+    my_list[key] = names = []  # Assigns my_list[key] and names the value [], modifying names modifys votes[key] too
+names.append('value1')
+```
+
+The dict type also provides the _setdefault_ for improved brevity. _setdefault_ tries to fetch the value of a key in the
+dictionary and if not present, the method assigns that key to the default value provided. And then the method returns
+the value for that key: either the originally present value or the newly inserted default value.
+
+```python
+names = my_list.setdefault(key, [])
+names.append(who)
+```
+
+There's also a big gotcha: The default value passed to _setdefault_ is assigned directly into the dictionary when
+the key is missing instead of being copied, so modifying the value also modifies the dict. Make sure that you always
+construct a new default value for each key I access with _setdefault_.
+
+### Prefer defaultdict Over setdefault to Handle Missing Items in Internal State
+
+When working with a dictionary that you didn't create, there are a variety of ways to handle missing keys, for some
+use cases _setdefault_ appears to be the shortest option:
+
+```python
+countries.setdefault('France', set()).add('Paris')  # Short
+
+if (japan := countries.get('Japan')) is None:  # Long
+    visits['Japan'] = japan = set()
+japan.add('Tokyo')
+```
+
+When you control the creation of the dictionary being accessed(like when you're using a dictionary instance to keep
+track of the internal state of a class), you might choose to hide the complexity of creating and adding elements to
+this state by providing a helper method like in:
+
+```python
+class Visits:
+    def __init__(self):
+        self.data = {}
+
+    def add(self, country, city):
+        city_set = self.data.setdefault(country, set())  # A new set is  instantiated in every call to add
+        city_set.add(city)
+```
+
+the _defaultdict_ class from the collections built-in module simplifies this common use case by automatically storing a
+default value when a key doesn't exist. All you have to do is provide a function that will return the default value to
+use each time a key is missing:
+
+```python
+from collections import defaultdict
+
+
+class Visits:
+    def __init__(self):
+        self.data = defaultdict(
+            set)  # set here is the function to use to generate the default value, passed as argument
+
+    def add(self, country, city):
+        self.data[country].add(city)
+```
+
+Using _defaultdict_ is much better than using setdefault for this type of situation, but _get_ is better if you
+don't control the dictionary creation.
+
+### Know How to Construct Key-Dependent Default Values with __missing__
+
+There are cases where _defaultdict_ or _setdefault_ is not the best fit for creating default values. For example in
+situations where the call to the function to create default values has some effects (like opening a file handle),
+given that the function is called even if the key exist in the dictionary. _defaultdict_ might be a choice but the
+function passed to this needs to be parameterless (in case of filehandles you need the path to it). Luckily, there
+is a solution to this, which is to subclass the dict type and implement the _\__missing___ special method to add custom
+logic for handling missing keys:
+
+```python
+class Pictures(dict):  # Subclass dict
+    def __missing__(self, path):
+        value = open_picture(path)
+        self[path] = value
+        return value
+
+    def open_picture(path):
+        try:
+            return open(path, 'a+b')
+        except OSError:
+            print(f'Failed to open path {path}')
+            raise
+
+pictures = Pictures()
+handle = pictures[path]
+handle.seek(0)
+image_data = handle.read()
+```
+
+When the `pictures[path]` dictionary access finds that the path key isn't present in the dictionary, the _\__missing___
+method is called. This method must create the new default value for the key, insert it into the dictionary, and return
+it to the caller. Subsequent accesses of the same path will not call _\__missing___ since the corresponding item is 
+already present.
 
 ## Chapter 3: Functions<a name="Chapter3"></a>
 
