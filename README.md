@@ -836,7 +836,7 @@ def trace(func):
     return wrapper
 ```
 
-Python functions have many other standard attributes (_\__name__, _\__module__, _\__annotations__) that must be
+Python functions have many other standard attributes (_\__name___, _\__module___, _\__annotations___) that must be
 preserved to maintain the interface of functions in the language. _wraps_ ensures that you'll always get the correct
 behavior.
 
