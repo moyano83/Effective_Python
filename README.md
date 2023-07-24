@@ -580,6 +580,7 @@ class Pictures(dict):  # Subclass dict
             print(f'Failed to open path {path}')
             raise
 
+
 pictures = Pictures()
 handle = pictures[path]
 handle.seek(0)
@@ -588,10 +589,256 @@ image_data = handle.read()
 
 When the `pictures[path]` dictionary access finds that the path key isn't present in the dictionary, the _\__missing___
 method is called. This method must create the new default value for the key, insert it into the dictionary, and return
-it to the caller. Subsequent accesses of the same path will not call _\__missing___ since the corresponding item is 
+it to the caller. Subsequent accesses of the same path will not call _\__missing___ since the corresponding item is
 already present.
 
 ## Chapter 3: Functions<a name="Chapter3"></a>
+
+### Never Unpack More Than Three Variables When Functions Return Multiple Values
+
+The unpacking syntax allows Python functions to seemingly return more than one value, you should never use more than
+three variables when unpacking the multiple return values from a function. These could be individual values from a
+three-tuple, two variables and one catch-all starred expression, or anything shorter. If you need to unpack more return
+values than that, you're better off defining a lightweight class or namedtuple.
+
+### Prefer Raising Exceptions to Returning None
+
+When writing utility functions, there's a draw for Python programmers to give special meaning to the return value of
+_None_. The problem is that in a condition like an _if_ statement, you might accidentally look for any False-equivalent
+value to indicate errors instead of only looking for _None_. For this case, you might want to split the return value
+into a two-tuple with the first value indicating the success or not of the operation and the second the actual value.
+The second approach is to never return None for special cases, and instead, raise an _Exception_ up to the caller and
+have the caller deal with it. The caller no longer requires a condition on the return value of the function. Instead, it
+can assume that the return value is always valid and use the results immediately in the _else_ block after _try_, but
+you have to document the exception-raising behavior and expect callers to rely on that in order to know which Exceptions
+they should plan to catch.
+
+### Know How Closures Interact with Variable Scope
+
+As seen before, a common way to sort a list is to pass a helper function as the key argument to a list's sort method.
+The helper's return value will be used as the value for sorting each item in the list. This works because:
+
+    * Python supports closures: functions that refer to variables from the scope in which they were defined
+    * Functions are first-class objects in Python: You can refer to them directly, assign them to variables, pass 
+      them as arguments to other functions, compare them in expressions and if statements, and so on
+    * Python has specific rules for comparing sequences (including tuples). It first compares items at index zero, then
+      if those are equal, it compares items at index one, and so on
+
+When you reference a variable in an expression, the Python interpreter traverses the scope to resolve the reference in
+this order:
+
+    1. The current function's scope
+    2. Any enclosing scopes (such as other containing functions)
+    3. The scope of the module that contains the code (also called the global scope)
+    4. The built-in scope (that contains functions like len and str)
+
+Assigning a value to a variable works differently. If the variable is already defined in the current scope, it will just
+take on the new value. If the variable doesn't exist in the current scope, Python treats the assignment as a variable
+definition. Critically, the scope of the newly defined variable is the function that contains the assignment.
+Python has a special syntax to get data out of a closure: The _nonlocal_ statement is used to indicate that scope
+traversal should happen upon assignment for a specific variable name. The only limit is that nonlocal won't traverse up
+to the module-level scope (to avoid polluting globals):
+
+```python
+def sort_priority(numbers, group):
+    found = False
+
+    def helper(x):
+        nonlocal found
+        if x in group:
+            found = True
+            return (0, x)
+        return (1, x)
+
+    numbers.sort(key=helper)
+    return found
+```
+
+The nonlocal statement makes it clear when data is being assigned out of a closure and into another scope. It's
+complementary to the global statement, which indicates that a variable's assignment should go directly into the module
+scope. When your usage of nonlocal starts getting complicated, it's better to wrap your state in a helper class.
+
+### Reduce Visual Noise with Variable Positional Arguments
+
+Accepting a variable number of positional arguments can make a function call clearer and reduce visual noise (varargs).
+If I already have a sequence (like a list) and want to call a variadic function like log, I can do this by using the
+_*_ operator:
+
+```python
+def log(message, *values):
+    if not values:
+        print(message)
+    else:
+        print(f'{message}: {", ".join(str(x) for x in values)}')
+
+
+favorites = ['red', 'blue', 'green']
+log('Favorite colors', *favorites)
+```
+
+There are two problems with accepting a variable number of positional arguments, one is that these optional positional
+arguments are always turned into a tuple before they are passed to a function. This means that if the caller of a
+function uses the * operator on a generator, it will be iterated until it's exhausted. The resulting tuple includes
+every value from the generator, which could consume a lot of memory and cause the program to crash.
+
+```python
+def my_generator():
+    for i in range(10):
+        yield i
+
+
+def my_func(*args):
+    print(args)
+
+
+it = my_generator()  # Potential memory issue here
+my_func(*it)
+```
+
+The second issue with _*args_ is that you can't add new positional arguments to a function in the future without
+migrating each caller: if you add a positional argument in front of the argument list, existing callers will break if
+not updated.
+
+Functions that accept _*args_ are best for situations where you know the number of inputs in the argument list will be
+reasonably small. _*args_ is ideal for function calls that pass many literals or variable names together. It's primarily
+for the convenience of the programmer and the readability of the code.
+
+### Provide Optional Behavior with Keyword Arguments
+
+All normal arguments to Python functions can also be passed by keyword, where the name of the argument is used in an
+assignment within the parentheses of a function call. The keyword arguments can be passed in any order as long as all of
+the required positional arguments are specified. If you already have a dictionary, you can use its contents to
+call a function by using the _**_ operator: `my_function(**my_dict)`. You can mix the _**_ operator with positional
+arguments or keyword arguments in the function call, as long as no argument is repeated. You can also use the _**_
+operator multiple times if you know that the dictionaries don't contain overlapping keys:
+
+```python
+my_dict1 = {'some_arg1': 1}
+my_dict2 = {'some_arg2': 2}
+my_function(**my_dict1, **my_dict2)
+```
+
+And if you'd like for a function to receive any named keyword argument, you can use the **kwargs catch-all parameter to
+collect those arguments into a dict that you can then process:
+
+```python
+def print_parameters(**kwargs):
+    for key, value in kwargs.items():
+        print(f'{key} = {value}')
+
+
+print_parameters(alpha=1.5, beta=9, gamma=4)
+```
+
+Keyword arguments make the function call clearer to new readers of the code, they can have default values specified in
+the function definition and they provide a powerful way to extend a function's parameters while remaining backward
+compatible with existing callers. The best practice is to always specify optional arguments using the keyword names and
+never pass them as positional arguments.
+
+### Use None and Docstrings to Specify Dynamic Default Arguments
+
+Sometimes you need to use a non-static type as a keyword argument's default value. Something to keep in mind is that a
+default argument value is evaluated only once per module load, which usually happens when a program starts up, so avoid
+defining default values for timestamp arguments. As with the timestamp example, the convention for achieving the
+desired result in Python is to provide a default value of _None_ and to document the actual behavior in the docstring:
+
+```python
+def log(message, when=None):
+    """Log a message with a timestamp.
+    
+    Args:
+        message: Message to print.
+        when: datetime of when the message occurred.
+            Defaults to the present time.
+    """
+    if when is None:
+        when = datetime.now()
+    print(f'{when}: {message}')
+```
+
+Using _None_ for default argument values is especially important when the arguments are mutable:
+
+```python
+import json
+
+
+def decode(data, default={}):
+    try:
+        return json.loads(data)
+    except ValueError:
+        return default  # ! WRONG: any subsequent change to this dictionary is propagated
+```
+
+The problem here is that the dictionary specified for default will be shared by all calls to decode because default
+argument values are evaluated only once (at module load time).
+
+### Enforce Clarity with Keyword-Only and Positional-Only Arguments
+
+To avoid confusion with the keyword arguments passed to a function, you can force the callers of that function to
+provide the keywords to the parameters by making them _keyword-only arguments_, the arguments marked like this can
+only be passed by keyword but never by position. The _*_ symbol in the argument list indicates the end of positional
+arguments and the beginning of keyword-only arguments, like in the function definition below:
+`def safe_division(number, divisor, *, ignore_overflow=False, ignore_zero_division=False)`
+Note that keyword arguments and their default values will work as expected. This approach has a flaw which is that
+the caller may specify the positional required arguments with a mix of positions and keywords, which will break in
+case I rename one of my parameters. This is problematic if you never intended for there parameters to be part of an
+explicit interface for the function (you just picked convenient parameter names chosen for the implementation). Python
+3.8 solves this by providing something called _positional-only arguments_, which forces these arguments to be supplied
+only by position and never by keyword, the _/_ symbol in the argument list marks where positional-only arguments ends:
+`def safe_division(number, divisor, /, *, ignore_overflow=False, ignore_zero_division=False)`. One notable consequence
+of keyword and positional only arguments is that any parameter name between the _/_ and _*_ symbols in the argument
+list may be passed either by position or by keyword.
+
+### Define Function Decorators with functools.wraps
+
+Python has special syntax for decorators that can be applied to functions. A decorator has the ability to run additional
+code before and after each call to a function it wraps. This means decorators can access and modify input arguments,
+return values, and raised exceptions. This functionality can be useful for enforcing semantics, debugging, registering
+functions, and more. One issue that can occur with decorators is that it can have side effects if we need to use the
+name of the decorated function, or do introspection (such as debuggers), Object serializers break because they can't
+determine the location of the original function that was decorated, calling the _help_ built in function will fail
+as well...
+
+```python
+def trace(func):
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        print(f'{func.__name__}({args!r}, {kwargs!r}) '
+              f'-> {result!r}')
+        return result
+
+    return wrapper
+
+
+# Using the _@_ symbol is equivalent to calling the decorator on the function it wraps and assigning the return value
+# to the original name in the same scope: `some_func = trace(some_func)`.
+@trace
+def some_func(n):
+    pass
+
+
+print(some_func)  # Prints <function trace.<locals>.wrapper at 0x108955dc0>
+```
+
+The solution is to use the wraps helper function from the _functools_ built-in module. This is a decorator that helps
+you write decorators. When you apply it to the wrapper function, it copies all of the important metadata about the
+inner function to the outer function:
+
+```python
+from functools import wraps
+
+
+def trace(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        ...
+
+    return wrapper
+```
+
+Python functions have many other standard attributes (_\__name__, _\__module__, _\__annotations__) that must be
+preserved to maintain the interface of functions in the language. _wraps_ ensures that you'll always get the correct
+behavior.
 
 ## Chapter 4: Comprehensions and Generators<a name="Chapter4"></a>
 
