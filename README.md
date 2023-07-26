@@ -842,6 +842,359 @@ behavior.
 
 ## Chapter 4: Comprehensions and Generators<a name="Chapter4"></a>
 
+### Use Comprehensions Instead of map and filter
+
+Comprehensions is the compact Python's syntax for deriving a new list from another sequence or iterable. An example of
+this syntax is `squares = [x**2 for x in a]`. Unless you're applying a single-argument function, list comprehensions are
+also clearer than the `map` built-in function for simple cases: `squares = map(lambda x: x ** 2, a)`. Unlike map, list
+comprehensions let you easily filter items from the input list, removing corresponding outputs from the result:
+`squares = [x**2 for x in a if x % 2 == 0]` instead of `squares = map(lambda x: x**2, filter(lambda x: x % 2 == 0, a))`.
+Dictionaries and sets have their own equivalents of list comprehensions (dictionary and set comprehensions):
+
+```python
+# The format is {k:v for expr}, note the ':' separating k and v
+squares_dict = {x: x ** 2 for x in a if x % 2 == 0}
+cubed_set = {x ** 3 for x in a if x % 3 == 0}
+# Now with map and filter which is much more verbose
+alt_dict = dict(map(lambda x: (x, x ** 2), filter(lambda x: x % 2 == 0, a)))
+alt_set = set(map(lambda x: x ** 3, filter(lambda x: x % 3 == 0, a)))
+```
+
+### Avoid More Than Two Control Subexpressions in Comprehensions
+
+Comprehensions support multiple levels of looping: `flat_matrix = [x for row in matrix for x in row]`. Or if you
+want the output to be another list: `squared_matrix = [[x**2 for x in row] for row in matrix]`. Anything deeper than two
+levels of iteration gets visually noisy, and the indentation of the loop alternative makes it even clearer.
+Comprehensions support multiple if conditions. Multiple conditions at the same loop level have an implicit and
+expression: `[x for x in a if x > 4 if x % 2 == 0]` is equivalent to `[x for x in a if x > 4 and x % 2 == 0]`.
+Conditions can be specified at each level of looping after the for subexpression (but avoid using list, dict, or set
+comprehensions that look like this): `[[x for x in row if x % 3 == 0] for row in matrix if sum(row) >= 10]`.
+The rule of thumb is to avoid using more than two control subexpressions in a comprehension. This could be two
+conditions, two loops, or one condition and one loop, use _if_ and _for_ statements otherwise.
+
+### Avoid Repeated Work in Comprehensions by Using Assignment Expressions
+
+A common pattern with comprehensions (list, dict, and set) is the need to reference the same computation in multiple
+places: `found = {name: check_item(stock.get(name, 0), 1) for name in order if check_item(stock.get(name, 0), 1)}`. The
+`check_item` function is called twice and can lead to errors if there is a change on the parameters in one of the calls.
+An easy solution to these problems is to use the walrus operator `:=`:
+`found = {name: batches for name in order if (batches := check_item(stock.get(name, 0), 1))}`.
+
+It's valid syntax to define an assignment expression in the value expression for a comprehension. But if you try to
+reference the variable it defines in other parts of the comprehension, you might get an exception at runtime because
+of the order in which comprehensions are evaluated: `{name: (tenth := count // 10) for name, count in stock.items()}`
+this will fail but this won't: `{name: tenth for name, count in stock.items() if (tenth := count // 10) > 0}`.
+If a comprehension uses the walrus operator in the value part of the comprehension and doesn't have a condition, it'll
+leak the loop variable into the containing scope, but it doesn't happen for the loop variables from comprehensions:
+
+```python
+half = [(last := count // 2) for count in stock.values()]
+print(f'Last item of {half} is {last}')  # prints Last item of [62, 17, 4, 12] is 12 as 'last' is available here
+half = [count // 2 for count in stock.values()]
+print(count)  # Exception because loop variable didn't leak
+```
+
+It's better not to leak loop variables, so use assignment expressions only in the condition part of a comprehension.
+Using an assignment expression also works the same way in generator expressions:
+
+```python
+found = ((name, batches) for name in order if (batches := check_item(stock.get(name, 0), 1)))
+print(next(found))  # Or some other operation over the iteration 
+```
+
+### Consider Generators Instead of Returning Lists
+
+Generators are produced by functions that use yield expressions. When called, a generator function does not actually run
+but instead immediately returns an iterator. With each call to the next built-in function, the iterator advances the
+generator to its next yield expression. You can easily convert the iterator returned by the generator to a list by
+passing it to the list built-in function if necessary: `list(some_function_that_returns_an_iterator(*args))`.
+The iterator returned by a generator produces the set of values passed to yield expressions within the generator
+function's body.
+
+### Be Defensive When Iterating Over Arguments
+
+When a function takes a list of objects as a parameter, it's often important to iterate over that list multiple times.
+In this case using an iterator can be problematic because it produces its results only a single time. If you iterate
+an iterator or a generator that has already raised a _StopIteration_ exception, you won't get results calling it again,
+but you also won't get errors either. This is because _for_ loops, the _list_ constructor, and many other functions
+throughout the Python standard library expect the _StopIteration_ exception to be raised during normal operation. To
+solve this, you can explicitly exhaust an input iterator and keep a copy of its entire contents in a list. The
+problem with this solution is that the copy of the input iterator's contents could be extremely large, causing the
+program to run out of memory and crash. One way around this is to accept a function that returns a new iterator each
+time it's called:
+
+```python
+def normalize_func(get_iter):
+    total = sum(get_iter())  # New iterator
+    result = []
+    for value in get_iter():  # New iterator
+        result.append(100 * value / total)
+    return result
+
+
+# To use normalize_func, I can pass in a lambda expression that calls the generator and produces a new iterator:
+percentages = normalize_func(lambda: read_visits('my_numbers.txt'))
+```
+
+A better way to achieve the same result is to provide a new container class that implements the iterator protocol. The
+iterator protocol is how Python for loops and related expressions traverse the contents of a container type.
+When Python sees a statement like `for x in foo`, it actually calls `iter(foo)`. The iter built-in function calls the
+`foo.__iter__` special method in turn. The _\__iter___ method must return an iterator object (which itself implements
+the _\__next___ special method). Then, the for loop repeatedly calls the next built-in function on the iterator object
+until it's exhausted (indicated by raising a _StopIteration_ exception).
+You can achieve all of this behavior for your classes by implementing the _\__iter___ method as a generator. so the
+above `get_iter()` call can be replaced by something like:
+
+```python
+class ReadVisits:
+    def __init__(self, data_path):
+        self.data_path = data_path
+
+    def __iter__(self):
+        with open(self.data_path) as f:
+            for line in f:
+                yield int(line)
+```
+
+And then pass an instance of this class, which would return a new iterator on the `sum(...)` and `for value...` calls.
+The protocol states that when an iterator is passed to the iter built-in function, iter returns the iterator itself. In
+contrast, when a container type is passed to iter, a new iterator object is returned each time. You can put a condition
+to check weather an object is an iterator instead of a container:
+
+```python
+if iter(some_numbers) is some_numbers:  # An iterator -- bad!
+    raise TypeError('Must supply a container')
+```
+
+Also, the `collections.abc` built-in module defines an Iterator class that can be used in an isinstance test this:
+
+```python
+from collections.abc import Iterator
+
+if isinstance(some_numbers, Iterator):  # Another way to check
+    raise TypeError('Must supply a container')
+```
+
+### Consider Generator Expressions for Large List Comprehensions
+
+The problem with list comprehensions is that they may create new list instances containing one item for each value in
+input sequences (this can even be a never ending list of values if it is derived from a network socket). To solve this
+issue, Python provides generator expressions, which are a generalization of list comprehensions and generators.
+Generator expressions evaluate to an iterator that yields one item at a time from the expression, instead of
+materializing the whole output sequence when they're run. You create a generator expression by putting
+list-comprehension-like syntax between _()_ characters: `the_iterator = (len(x) for x in open('my_file.txt'))`.
+Generator expressions can be composed together: `roots = ((x, x**0.5) for x in the_iterator)`. Each time I advance this
+iterator, it also advances the interior iterator, creating a domino effect of looping, evaluating conditional
+expressions, and passing around inputs and outputs. Generator expressions are a great choice to compose
+functionality that's operating on a large stream of input. Be careful not to use these iterators more than once as
+they are stateful.
+
+### Compose Multiple Generators with yield from
+
+Generators are so useful that many programs start to look like layers of generators strung together. To avoid
+clumsiness on the nesting of generators such as:
+
+```python
+def composing_generators():
+    for delta in some_generator1(arg1):
+        yield delta
+    for delta in some_generator2(arg2):
+        yield delta
+    for delta in some_generator1(arg3):
+        yield delta
+```
+
+Is to use the yield from expression:
+
+```python
+def composing_generators_with_yield():
+    yield from some_generator1(arg1)
+    yield from some_generator2(arg2)
+    yield from some_generator3(arg3)
+```
+
+`yield from` causes the Python interpreter to handle the nested _for_ loop and _yield_ expression boilerplate for you,
+which results in better performance.
+
+### Avoid Injecting Data into Generators with send
+
+_yield_ expressions provide generator functions with a simple way to produce an iterable series of output values but
+there's no immediately obvious way to simultaneously stream data in and out of a generator as it runs. Python
+generators support the _send_ method, which upgrades _yield_ expressions into a two-way channel, which can be used to
+provide streaming inputs to a generator at the same time it's yielding outputs. Normally, when iterating a generator,
+the value of the yield expression is None `returned_value = yield 1 # returned_value is None`, but when I call the
+_send_ method instead of iterating the generator with a _for_ loop or the next built-in function, the supplied parameter
+becomes the value of the _yield_ expression when the generator is resumed (when the generator first starts, a _yield_
+expression has not been encountered yet, so the only valid value for calling _send_ initially is _None_):
+
+```python
+def my_generator():
+    received = yield 1
+    print(f'received = {received}')
+
+
+it = iter(my_generator())
+output = it.send(None)  # Get first generator output
+print(f'output = {output}')
+
+try:
+    it.send('hello!')  # Send value into the generator
+except StopIteration:
+    pass
+
+# The output of the above is
+# output = 1
+# received = hello!
+```
+
+To use this in a function you can store the value provided by _send_ by using _yield_ and then act accordingly:
+
+```python
+def wave_modulating(steps):
+    amplitude = yield  # Receive initial amplitude
+    for step in range(steps):
+        output = amplitude * math.sin(step * (2 * math.pi / steps))
+        amplitude = yield output  # Receive next amplitude
+```
+
+But what if we want to chain multiple signals together in sequence? Using the _send_ instead of just yield would  
+introduce _None_ values in between the result. When each _yield_ from expression finishes iterating over a nested
+generator, it moves on to the next one. Each nested generator starts with a bare _yield_ expression (one without a
+value) in order to receive the initial amplitude from a generator _send_ method call. This causes the parent
+generator to output a _None_ value when it transitions between child generators. For this reason is better to avoid
+the _send_ method entirely and go with a simpler approach. The easiest solution is to pass an iterator to the function
+like this:
+
+```python
+import math
+
+
+def wave_cascading(amplitude_it, steps):
+    for step in range(steps):
+        radians = step * (2 * math.pi / steps)
+        fraction = math.sin(radians)
+        amplitude = next(amplitude_it)  # Get next input
+        yield amplitude * fraction
+
+
+# Iterators are stateful each of the nested generators picks up where the previous generator left off
+def complex_wave_cascading(amplitude_it):
+    yield from wave_cascading(amplitude_it, 3)
+    yield from wave_cascading(amplitude_it, 4)
+
+
+def run_cascading():
+    amplitudes = [7, 7, 7, 2, 2, 2, 2]
+    it = complex_wave_cascading(iter(amplitudes))
+    for _ in amplitudes:
+        print(next(it))
+
+
+run_cascading()
+```
+
+### Avoid Causing State Transitions in Generators with throw
+
+Another advanced generator feature is the throw method for re-raising Exception instances within generator functions.
+When the _throw_ method is called, the next occurrence of a yield expression re-raises the provided Exception instance
+after its output is received instead of continuing normally. The throw method can be used to re-raise exceptions within
+generators at the position of the most recently executed yield expression.
+
+```python
+class MyError(Exception):
+    pass
+
+
+def my_generator():
+    yield 1
+    yield 2
+    yield 3
+
+
+it = my_generator()
+print(next(it))  # Yield 1
+print(next(it))  # Yield 2
+print(it.throw(NotImplementedError))  # Throws an exception
+```
+
+When you call _throw_, the generator function may catch the injected exception with a standard _try/except_ compound
+statement that surrounds the last _yield_ expression that was executed.
+
+```python
+# The below generator will yield [1,2,'Error!',4]
+def my_generator():
+    yield 1
+    try:
+        yield 2
+    except NotImplementedError:
+        print('Error!')
+    else:
+        yield 3
+    yield 4
+```
+
+This functionality provides a two-way communication channel between a generator and its caller that can be useful in
+certain situations, but as with _send_, a best approach is to define a stateful closure using an iterable container
+object. Often, what you're trying to accomplish by mixing generators and exceptions is better achieved with
+asynchronous features (better to avoid this completely).
+
+### Consider itertools for Working with Iterators and Generators
+
+The itertools built-in module contains a large number of functions that are useful for organizing and interacting with
+iterators. The following describe the most important functions that you should know in three primary categories:
+
+#### Linking Iterators Together
+
+```python
+from itertools import chain, repeat, cycle, tee, zip_longest
+
+chain([1, 2, 3], [4, 5, 6])  # combine multiple iterators into a single sequential iterator
+repeat('hello', 3)  # output a single value forever, or use the second parameter to specify the repetitions
+[next(cycle([1, 2])) for _ in range(10)]  # repeat an iterator's items forever:  [1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+# split a single iterator into the number of parallel iterators specified by the second parameter
+tee(['first', 'second'], 3)  # produces 3 iterators each one with ['first','second']
+zip_longest([1, 2, 3], ['one', 'two'], fillvalue='na')  # returns a the fillvalue value when an iterator is exhausted
+```
+
+#### Filtering Items from an Iterator
+
+```python
+from itertools import islice, takewhile, dropwhile, filterfalse
+
+# Use islice to slice an iterator by numerical indexes without copying. You can specify the end, start and end, or 
+# start, end, and step sizes and the behavior is similar to that of standard sequence slicing and striding
+islice([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5)  # returns [1,2,3,4,5] 
+islice([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 2, 8, 2)  # returns [3,5,7]
+takewhile(lambda x: x < 7, [4, 5, 6, 7, 8, 9])  # returns items until a predicate function returns False [4,5,6]
+dropwhile(lambda x: x < 7, [4, 5, 6, 7, 8, 9])  # Opposite to takewhile [7,8,9]
+filterfalse(lambda x: x < 7, [4, 5, 6, 7, 8, 9])  # opposite of the filter built-in function returns [7,8,9]
+```
+
+#### Producing Combinations of Items from Iterators
+
+```python
+from itertools import accumulate, product, permutations, combinations, combinations_with_replacement
+
+values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+
+def sum_modulo_20(first, second):
+    output = first + second
+    return output % 20
+
+
+# folds an item from the iterator into a running value by applying a function that takes two parameters. Outputs the 
+# current accumulated result for each input value
+accumulate(values)  # outputs [1, 3, 6, 10, 15, 21, 28, 36, 45, 55]
+accumulate(values, sum_modulo_20)  # outputs [1, 3, 6, 10, 15, 1, 8, 16, 5, 15]
+# Cartesian product of items from one or more iterators
+product([1, 2], repeat=2)  # [(1, 1), (1, 2), (2, 1), (2, 2)]
+product([1, 2], ['a', 'b'])  # [(1, 'a'), (1, 'b'), (2, 'a'), (2, 'b')]
+permutations([1, 2, 3], 2)  # returns the unique ordered permutations of length N: [(1,2),(1,3),(1,4),(2,1),(2,3)...]
+combinations([1, 2, 3], 2)  # returns the unordered combinations of length N with unrepeated items from an iterator
+combinations_with_replacement([1, 2, 3], 2)  # like combinations but with repeated values:  [(1,1),(1,2),(1,3),...]
+```
+
 ## Chapter 5: Classes and Interfaces<a name="Chapter5"></a>
 
 ## Chapter 6: Metaclasses and Attributes<a name="Chapter6"></a>
