@@ -1197,6 +1197,469 @@ combinations_with_replacement([1, 2, 3], 2)  # like combinations but with repeat
 
 ## Chapter 5: Classes and Interfaces<a name="Chapter5"></a>
 
+### Compose Classes Instead of Nesting Many Levels of Built-in Types
+
+Python's built-in dictionary type is good for maintaining dynamic internal state over the lifetime of an object, like
+situations in which you need to do bookkeeping for an unexpected set of identifiers. But there's a danger of
+overextending them to write brittle code. For example if you have a student grade system in place which student names
+are not known in advance you might use a map to add and store the student names with the grades. Later on if you want to
+itemize the scores by student and subject you might be tempted to add another dictionary under students with the names
+of the subjects and the score, but if later the requirements change again and then you see yourself adding yet other
+inner dictionaries, it is time to refactor the code to use a hierarchy of classes (you should avoid using sets,
+tuples and dicts for more than a level of nesting).
+
+#### Refactoring to Classes
+
+Start moving to classes at the bottom of the dependency tree. Avoid tuples or positional data structures to store
+information as it is difficult to maintain in case of a change of requirements. _namedtuple_ is a more appropriate type
+as it lets you easily define tiny, immutable data classes (in the case of class grades before):
+
+```python
+from collections import namedtuple
+
+Grade = namedtuple('Grade', ('score', 'weight'))
+```
+
+These classes can be constructed with positional or keyword arguments. The fields are accessible with named attributes.
+Having named attributes makes it easy to move from a _namedtuple_ to a class later if the requirements change again.
+Keep in mind that _namedtuple_ doesn't support default values and therefore is not good to store optional properties
+and its attribute values are still accessible using numerical indexes and iteration so it can lead to unintentional
+usages on external API's. In the case of School grades, the final representation will look like this:
+
+```python
+from collections import defaultdict, namedtuple
+
+Grade = namedtuple('Grade', ('score', 'weight'))
+
+
+class Subject:
+    def __init__(self):
+        self._grades = []
+
+    def report_grade(self, score, weight):
+        self._grades.append(Grade(score, weight))
+
+    def average_grade(self):
+        total, total_weight = 0, 0
+        for grade in self._grades:
+            total += grade.score * grade.weight
+            total_weight += grade.weight
+        return total / total_weight
+
+
+class Student:
+    def __init__(self):
+        self._subjects = defaultdict(Subject)
+
+    def get_subject(self, name):
+        return self._subjects[name]
+
+    def average_grade(self):
+        total, count = 0, 0
+        for subject in self._subjects.values():
+            total += subject.average_grade()
+            count += 1
+        return total / count
+
+
+class Gradebook:
+    def __init__(self):
+        self._students = defaultdict(Student)
+
+    def get_student(self, name):
+        return self._students[name]
+```
+
+### Accept Functions Instead of Classes for Simple Interfaces
+
+Many built-in APIs allow you to customize behavior by passing in a callback function. In other languages, you might
+expect hooks to be defined by an abstract class. In Python, many hooks are just stateless functions with well-defined
+arguments and return values. Supplying these type of functions makes APIs easy to build and test because it separates
+side effects from deterministic behavior. If the function passed needs to maintain state you can use a stateful closure:
+
+```python
+from collections import defaultdict
+
+
+def increment_with_report(current, increments):
+    added_count = 0
+
+    def missing():
+        nonlocal added_count  # Stateful closure
+        added_count += 1
+        return 0
+
+    result = defaultdict(missing, current)
+    for key, amount in increments:
+        result[key] += amount
+    return result, added_count
+```
+
+This make it easier for simple functions passed to interfaces to add functionality later by hiding state in a closure.
+Another approach is to define a small class that encapsulates the state you want to track:
+
+```python
+class CountMissing:
+    def __init__(self):
+        self.added = 0
+
+    def missing(self):
+        self.added += 1
+        return 0
+
+# And  then  use it like:
+# counter = CountMissing()
+# result = defaultdict(counter.missing, current)  <-- Method ref
+```
+
+The above code still leaves certain bits unclear: Who constructs a _CountMissing_ object or calls the _missing_ method?
+Python allows classes to define the _\__call___ special method. _\__call___ allows an object to be called just like a
+function. It also causes the callable built-in function to return True for such an instance, just like a normal function
+or method. All objects that can be executed in this manner are referred to as callables:
+
+```python
+class BetterCountMissing:
+    def __init__(self):
+        self.added = 0
+
+    def __call__(self):
+        self.added += 1
+        return 0
+
+# And then use it like:
+# counter = BetterCountMissing()
+# assert counter() == 0 and callable(counter)
+# result = defaultdict(counter, current)  <-- Relies on __call__
+```
+
+The _\__call___ method indicates that a class's instances can be used where a function argument is suitable also.
+
+### Use @classmethod Polymorphism to Construct Objects Generically
+
+In Python, not only do objects support polymorphism, but classes do as well. say that I'm writing a MapReduce
+implementation, and I want a common class to represent the input data:
+
+```python
+class InputData:
+    def read(self):
+        raise NotImplementedError  # must be defined by subclasses
+
+
+class PathInputData(InputData):  # Some concrete implementation
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+
+    def read(self):
+        with open(self.path) as f:
+            return f.read()
+```
+
+Similarly for the workers, we could have the following:
+
+```python
+class Worker:
+    def __init__(self, input_data):
+        self.input_data = input_data
+        self.result = None
+
+    def map(self):  # 'Abstract' implementation, needs to be present on the subclasses
+        raise NotImplementedError
+
+    def reduce(self, other):
+        raise NotImplementedError
+
+
+class LineCountWorker(Worker):
+    def map(self):
+        data = self.input_data.read()
+        self.result = data.count('\n')
+
+    def reduce(self, other):
+        self.result += other.result
+```
+
+After we have this implementation in place, how do we connect them? The simplest approach is to manually build and
+connect the objects with some helper functions:
+
+```python
+import os
+from threading import Thread
+
+
+def generate_inputs(data_dir):  # Lists the contents of the folder passed 
+    for name in os.listdir(data_dir):
+        yield PathInputData(os.path.join(data_dir, name))
+
+
+def create_workers(input_list):  # create the LineCountWorker from the InputDatainstances returned by generate_inputs
+    workers = []
+    for input_data in input_list:
+        workers.append(LineCountWorker(input_data))
+    return workers
+
+
+def execute(workers):
+    threads = [Thread(target=w.map) for w in workers]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+    first, *rest = workers
+    for worker in rest:  # combines the results into one final value
+        first.reduce(worker)
+    return first.result
+
+
+def mapreduce(data_dir):  # connect all the pieces together in a function to run each step
+    inputs = generate_inputs(data_dir)
+    workers = create_workers(inputs)
+    return execute(workers)
+```
+
+The problem with the above implementation is that the _mapreduce_ function is not generic at all. If I wanted to write
+another _InputData_ or _Worker_ subclass, I would also have to rewrite the _generate_inputs_, _create_workers_, and
+_mapreduce_ functions to match. In other languages you'd solve this by constructor polymorphism, but Python only allows
+for the single constructor method _\__init___. The best way to solve this problem is with *class method* polymorphism.
+This is like an instance method polymorphism except that it's for whole classes instead of their constructed objects:
+
+```python
+import os
+
+
+class GenericInputData:
+    def read(self):
+        raise NotImplementedError
+
+    @classmethod
+    # Take a dictionary with a set of configuration parameters that the concrete subclass needs to interpret.
+    # Note we are passing 'cls' and not 'self'
+    def generate_inputs(cls, config):
+        raise NotImplementedError
+
+
+class PathInputData(GenericInputData):
+
+    @classmethod
+    def generate_inputs(cls, config):
+        data_dir = config['data_dir']
+        for name in os.listdir(data_dir):
+            yield cls(os.path.join(data_dir, name))
+```
+
+Similarly, I can add the _create\_workers_ helper part and construct instances of the _GenericWorker_ concrete
+subclass by using `cls()` as a generic constructor:
+
+```python
+class GenericWorker:
+    def __init__(self, input_data):
+        self.input_data = input_data
+        self.result = None
+
+    def map(self):
+        raise NotImplementedError
+
+    def reduce(self, other):
+        raise NotImplementedError
+
+    @classmethod
+    def create_workers(cls, input_class, config):
+        workers = []
+        for input_data in input_class.generate_inputs(config):
+            # calling cls() provides an alternative way to construct GenericWorker objects besides using __init__ 
+            workers.append(cls(input_data))
+        return workers
+```
+
+Then rewrite the _mapreduce_ function to be completely generic:
+
+```python
+def mapreduce(worker_class, input_class, config):
+    workers = worker_class.create_workers(input_class, config)
+    return execute(workers)
+
+# Finally we execute the above passing the classes
+# result = mapreduce(LineCountWorker, PathInputData, {'data_dir': tmpdir})
+```
+
+### Initialize Parent Classes with super
+
+The old, simple way to initialize a parent class from a child class is to directly call the parent class's _\__init___
+method with the child instance, which works fine for basic class hierarchies but breaks in cases such as multiple
+inheritance (something to avoid), the _\__init___ call order is not specified across all subclasses. Or diamond
+inheritance (inherits from two separate classes that have the same superclass somewhere in the hierarchy) which causes
+the common superclass's _\__init___ method to run multiple times causing unexpected behavior.
+To solve these problems, Python has the super built-in function and standard method resolution order *(MRO)*. _super_
+ensures that common superclasses in diamond hierarchies are run only once, the MRO defines the ordering in which
+superclasses are initialized, following an algorithm called *C3 linearization*:
+
+```python
+class Times7(BaseClass):
+    def __init__(self, value):  # MyBaseClass.__init__, is run only a single time
+        super().__init__(value)
+        self.value *= 7
+
+
+class Plus9(BaseClass):
+    def __init__(self, value):
+        super().__init__(value)
+        self.value += 9
+
+
+class GoodWay(Times7, Plus9):  # The parent classes are run in the order specified in the class statement
+    def __init__(self, value):
+        super().__init__(value) 
+```
+
+You can access the Order of execution by calling the `GoodWay.mro()` method. The above calls `GoodWay.__init__`,
+`Plus9.__init__`, then `Times7.__init__` and `SomeBaseClass.__init__`. Once this reaches the top of the diamond, all of
+the initialization methods do their work in the opposite order from how their _\__init___ functions were called.
+Call to `super().__init__` is much more maintainable than calling `BaseClass.__init__` directly from within subclasses.
+The _super_ function can also be called with two parameters: first the type of the class whose MRO parent view you're
+trying to access, and then the instance on which to access that view. These parameters are not required for object
+instance initialization as Python's compiler automatically provides the correct parameters (_\__class___ and _self_) for
+you when super is called with zero arguments within a class definition:
+
+```python
+class ExplicitTrisect(BaseClass):
+    def __init__(self, value):
+        super(ExplicitTrisect, self).__init__(value)
+        self.value /= 3
+```
+
+### Consider Composing Functionality with Mix-in Classes
+
+Python is an object-oriented language with built-in facilities for making multiple inheritance tractable although you
+should consider writing a mix-in (class that defines only a small set of additional methods for its child classes to
+provide) instead of using multiple inheritance in order to leverage its convenience and encapsulation. Mix-in classes
+don't define their own instance attributes nor require their _\__init___ constructor to be called. Python makes it
+trivial to inspect the current state of any object, regardless of its type. _Dynamic inspection_ means you can write
+generic functionality just once, in a mix-in, and it can then be applied to many other classes. Mix-ins can be composed
+and layered to minimize repetitive code and maximize reuse. An example of this is to a Mix-in to transform a large
+number of python objects into a dictionary using:
+
+```python
+class ToDictMixin:
+    def to_dict(self):
+        return self._traverse_dict(self.__dict__)
+
+    def _traverse_dict(self, instance_dict):
+        output = {}
+        for key, value in instance_dict.items():
+            output[key] = self._traverse(key, value)
+        return output
+
+    def _traverse(self, key, value):  # Implementation details are straightforward and rely on dynamic attribute access
+        if isinstance(value, ToDictMixin):
+            return value.to_dict()
+        elif isinstance(value, dict):
+            return self._traverse_dict(value)
+        elif isinstance(value, list):
+            return [self._traverse(key, i) for i in value]
+        elif hasattr(value, '__dict__'):
+            return self._traverse_dict(value.__dict__)
+        else:
+            return value
+
+
+# Using the above mixin and the class below together:
+class BinaryTree(ToDictMixin):
+    def __init__(self, value, left=None, right=None):
+        self.value = value
+        self.left = left
+        self.right = right
+
+
+tree = BinaryTree(10, left=BinaryTree(7, right=BinaryTree(9)), right=BinaryTree(13, left=BinaryTree(11)))
+
+
+# Transforming the class above to something readable is as simple as calling print(tree.to_dict())
+
+# You can make their mix-ins generic functionality pluggable so behaviors can be overridden when required. 
+class BinaryTreeWithParent(BinaryTree):
+    def __init__(self, value, left=None, right=None, parent=None):
+        super().__init__(value, left=left, right=right)
+        self.parent = parent
+
+    def _traverse(self, key, value):
+        if (isinstance(value, BinaryTreeWithParent) and key == 'parent'):
+            return value.value  # Prevent cycles
+        else:
+            return super()._traverse(key, value)
+```
+
+In the example above, by defining `BinaryTreeWithParent._traverse`, we've also enabled any class that has an attribute
+of type _BinaryTreeWithParent_ to automatically work with the _ToDictMixin_. Mix-ins can also be composed together:
+
+```python
+import json
+
+
+class JsonMixin:
+    @classmethod
+    def from_json(cls, data):
+        kwargs = json.loads(data)
+        return cls(**kwargs)
+
+    # the only requirements of a JsonMixin subclass are providing a 
+    # to_dict method and taking keyword arguments for the __init__ method 
+    def to_json(self):
+        return json.dumps(self.to_dict())
+```
+
+Avoid using multiple inheritance with instance attributes and _\__init___ if mix-in classes can achieve the same
+outcome.
+
+### Prefer Public Attributes Over Private Ones
+
+In Python, there are only two types of visibility for a class's attributes: public and private. Public attributes
+can be accessed by anyone using the dot operator on the object and private fields are specified by prefixing an
+attribute's name with a double underscore. Private fields can be accessed from methods of the container class but
+directly accessing private fields from outside the class raises an exception. Class methods also have access to private
+attributes because they are declared within the surrounding class block. A subclass can't access its parent class's
+private fields. The private attribute behavior is implemented with a simple transformation of the attribute name. When
+the Python compiler sees private attribute access in methods like MyChildObject.get_private_field, it translates the
+_\__private\_field__ attribute access to use the name _\_MyChildObject__private\_field_ instead. Accessing the parent's
+private attribute from the child class fails simply because the transformed attribute name doesn't exist. Accessing
+the parent's private attribute from the child class fails simply because the transformed attribute name doesn't exist.
+Check the object's attribute dictionary to see that you get the private attributes stored with the names as they appear
+after the transformation: `print(foo.__dict__)`. Fields prefixed by a single underscore (like _protected_field) are
+protected by convention, meaning external users of the class should proceed with caution. This means that by choosing
+private attributes, you're only making subclass overrides and extensions cumbersome and brittle. Your potential
+subclassers will still access the private fields when they absolutely need to do so, but if the class hierarchy
+changes beneath you, these classes will break because the private attribute references are no longer valid. As a rule,
+document each protected field and explain which fields are internal APIs available to subclasses and which should be
+left alone entirely. The only time to seriously consider using private attributes is when you're worried about naming
+conflicts with subclasses (primarily a concern with classes that are part of a public API). To reduce the risk of this
+issue occurring, you can use a private attribute in the parent class to ensure that there are no attribute names that
+overlap with child classes
+
+### Inherit from collections.abc for Custom Container Types
+
+Every Python class is a container of some kind, encapsulating attributes and functionality together. Python also
+provides built-in container types for managing data: lists, tuples, sets, and dictionaries. When you're designing
+classes for simple use cases like sequences, it's natural to want to subclass Python's built-in list type directly.
+Now, imagine that I want to provide an object that feels like a list and allows indexing but isn't a list subclass.
+How do you make this class act like a sequence type? Python implements its container behaviors with instance methods
+that have special names.
+
+```python
+bar = [1, 2, 3]
+bar[0]
+# it will be interpreted as:
+bar.__getitem__(0)
+```
+
+To make a class act like a sequence, you can provide a custom implementation of _\__getitem___, but implementing this
+method isn't enough to provide all of the sequence semantics you'd expect from a list instance (for example
+`len(myclass)` won't work), there are several methods you'll need to implement.
+
+To avoid this difficulty throughout the Python universe, the built-in __collections.abc__ module defines a set of
+abstract base classes that provide all the typical methods for each container type. When you subclass from these
+abstract base classes and forget to implement required methods, the module tells you something is wrong:
+When you do implement all the methods required by an abstract base class from __collections.abc__, it provides all the
+additional methods, like __index__ and __count__, for free. Beyond the __collections.abc__ module, Python uses a variety
+of special methods for object comparisons and sorting, which may be provided by container classes and non-container
+classes alike. 
+
 ## Chapter 6: Metaclasses and Attributes<a name="Chapter6"></a>
 
 ## Chapter 7: Concurrency and Parallelism<a name="Chapter7"></a>
