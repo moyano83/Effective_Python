@@ -1658,9 +1658,570 @@ abstract base classes and forget to implement required methods, the module tells
 When you do implement all the methods required by an abstract base class from __collections.abc__, it provides all the
 additional methods, like __index__ and __count__, for free. Beyond the __collections.abc__ module, Python uses a variety
 of special methods for object comparisons and sorting, which may be provided by container classes and non-container
-classes alike. 
+classes alike.
 
 ## Chapter 6: Metaclasses and Attributes<a name="Chapter6"></a>
+
+### Use Plain Attributes Instead of Setter and Getter Methods
+
+Metaclasses let you intercept Python's class statement and provide special behavior each time a class is defined.
+Dynamic attributes enable you to override objects and cause unexpected side effects. Metaclasses can create extremely
+bizarre behaviors that are unapproachable to newcomers. Programmers coming to Python from other languages may naturally
+try to implement explicit getter and setter methods in their classes. This methods are clumsy but help define the
+interface for a class, making it easier to encapsulate functionality, validate usage, and define boundaries.
+In Python you never need to implement explicit setter or getter methods, instead, you should always start your
+implementations with simple public attributes. Later, if I decide I need special behavior when an attribute is set, I
+can migrate to the _@property_ decorator:
+
+```python
+class VoltageResistance(Resistor):
+    def __init__(self, ohms):
+        super().__init__(ohms)
+        self._voltage = 0
+
+    @property
+    def voltage(self):  # In order for this code to work properly, the names of both the setter and the 
+        return self._voltage  # getter methods must match the intended property name
+
+    @voltage.setter
+    def voltage(self, voltage):
+        self._voltage = voltage
+        self.current = self._voltage / self.ohms
+
+
+r2 = VoltageResistance(1e3)
+r2.voltage = 10  # assigning the voltage property will run the voltage setter method
+```
+
+Specifying a setter on a property also enables me to perform type checking and validation on values passed to the class.
+When you use __@property__ methods to implement setters and getters, be sure that the behavior you implement is not
+surprising. For example, don't set other attributes in getter property methods. Be sure to also avoid any other side
+effects that the caller may not expect beyond the object, such as importing modules dynamically, running slow helper
+functions, doing I/O, or making expensive database queries. The biggest shortcoming of __@property__ is that the
+methods for an attribute can only be shared by subclasses. Unrelated classes can't share the same implementation.
+
+### Consider @property Instead of Refactoring Attributes
+
+One advanced but common use of __@property__ is transitioning what was once a simple numerical attribute into an
+on-the-fly calculation. This is extremely helpful because it lets you migrate all existing usage of a class to have new
+behaviors without requiring any of the call sites to be rewritten (which is especially important if there's calling code
+that you don't control). This let you make incremental progress toward better data models by using __@property__, but
+consider refactoring a class and all call sites when you find yourself using __@property__ too heavily.
+
+### Use Descriptors for Reusable @property Methods
+
+The big problem with the __@property__ built-in is that the methods it decorates can't be reused for multiple
+attributes of the same class. They also can't be reused by unrelated classes. Imagine you want to write a class that
+has a validation that is common for several properties of the class, instead of calling the validation check on each
+method, you can use a __descriptor__. The descriptor protocol defines how attribute access is interpreted by the
+language. A descriptor class can provide _\__get___ and _\__set___ methods that let you reuse the validation behavior
+without boilerplate:
+
+```python
+class Grade:
+    def __get__(self, instance, instance_type):
+        pass
+
+    def __set__(self, instance, value):
+        pass
+
+
+class Exam:
+    # Class attributes
+    math_grade = Grade()
+    science_grade = Grade()
+    grade = Grade()
+```
+
+When I assign a property like `exam.grade = 40`, it is interpreted as `Exam.__dict__['grade'].__set__(exam, 40)`. When
+I retrieve a property `exam.grade`, it is interpreted as `Exam.__dict__['grade'].__get__(exam, Exam)`. In short, when an
+__Exam__ instance doesn't have an attribute named __grade__, Python falls back to the __Exam__ class's attribute
+instead. If this class attribute is an object that has _\__get___ and _\__set___ methods, Python assumes that you want
+to follow the descriptor protocol. Combining this with __@property__ and you get something like:
+
+```python
+class Grade:
+    def __init__(self):
+        self._value = 0
+
+    def __get__(self, instance, instance_type):
+        return self._value
+
+    def __set__(self, instance, value):
+        if not (0 <= value <= 100):
+            raise ValueError(
+                'Grade must be between 0 and 100')
+        self._value = value
+
+
+class Exam:
+    math_grade = Grade()
+    writing_grade = Grade()
+    science_grade = Grade()
+```
+
+But the problem with the above implementation is that a single __Grade__ instance is shared across all __Exam__
+instances for the class attributes. The __Grade__ instance for this attribute is constructed once in the program
+lifetime, when the __Exam__ class is first defined. You can keep track of the __Grade__ value for each unique __Exam__
+instance by saving the per-instance state in a dictionary:
+
+```python
+class Grade:
+    def __init__(self):
+        self._values = {}
+
+    def __get__(self, instance, instance_type):
+        if instance is None:
+            return self
+        return self._values.get(instance, 0)
+
+    def __set__(self, instance, value):
+        if not (0 <= value <= 100):
+            raise ValueError('Grade must be between 0 and 100')
+        self._values[instance] = value
+```
+
+The _values dictionary holds a reference to every instance of Exam ever passed to _\__set___ over the lifetime of the
+program, which causes instances to never have their reference count go to zero, preventing cleanup by the garbage
+collector. To fix this, I can use Python's __weakref__ built-in module. This module provides a special class called
+__WeakKeyDictionary__ that can take the place of the simple dictionary used for _values. This class removes instances
+from its set of items when the Python runtime knows it's holding the instance's last remaining reference in the program:
+
+```python
+from weakref import WeakKeyDictionary
+
+
+class Grade:
+    def __init__(self):
+        self._values = WeakKeyDictionary()
+```
+
+### Use __getattr__, __getattribute__, and __setattr__ for Lazy Attributes
+
+Imagine that I want to represent the records in a database as Python objects, the code that connects Python objects to
+the database doesn't need to explicitly specify the schema of the records, it can be generic. Python makes this dynamic
+behavior possible with the _\__getattr___ special method. This is because this method is called every time an attribute
+can't be found in an object's instance dictionary (is not called if the attribute is already there). This behavior is
+especially helpful for use cases like lazily accessing schemaless data.
+
+```python
+class LazyRecord:
+    def __init__(self):
+        self.exists = 5
+
+    def __getattr__(self, name):
+        value = f'Value for {name}'
+        setattr(self, name, value)
+        return value
+```
+
+Python has another object hook called _\__getattribute___. This special method is called every time an attribute is
+accessed on an object, even in cases where it does exist in the attribute dictionary (if a property shouldn't exist,
+I can raise an __AttributeError__):
+
+```python
+class ValidatingRecord:
+    def __init__(self):
+        self.exists = True
+
+    def __getattribute__(self, name):
+        try:
+            return super().__getattribute__(name)
+        except AttributeError:
+            value = f'Value for {name}'
+            setattr(self, name, value)
+            return value
+```
+
+Imagine that I want to lazily push data back to the database when values are assigned to my Python object. I can do
+this with _\__setattr___, a similar object hook that lets you intercept arbitrary attribute assignments. The
+_\__setattr___ method is always called every time an attribute is assigned on an instance. The problem with
+_\__getattribute___ and ___\setattr___ is that they're called on every attribute access for an object, even when you
+may not want that to happen. This could cause infinite recursion as an object call to get/set a property calls the
+get or set attribute methods which in turns access the property on the object which makes a call to the get or set
+attribute method again and again, to avoid this use methods from __super()__ (i.e., the object class) to access
+instance attributes.
+
+### Validate Subclasses with __init_subclass__
+
+One of the simplest applications of metaclasses is verifying that a class was defined correctly. When you're building a
+complex class hierarchy, you may want to enforce style, require overriding methods, or have strict relationships
+between class attributes. Metaclasses enable these use cases by providing a reliable way to run your validation code
+each time a new subclass is defined. Using metaclasses for validation can raise errors even before _\__init__ is
+called, when the module containing the class is first imported at program startup.
+
+A metaclass is defined by inheriting from type. In the default case, a metaclass receives the contents of associated
+class statements in its _\__new___ method:
+
+```python
+class ValidatePolygon(type):
+    def __new__(meta, name, bases, class_dict):
+        if bases:  # Only validate subclasses of the Polygon class
+            if class_dict['sides'] < 3:
+                raise ValueError('Polygons need 3+ sides')
+        return type.__new__(meta, name, bases, class_dict)
+
+
+class Polygon(metaclass=ValidatePolygon):
+    sides = None  # Must be specified by subclasses
+
+    @classmethod
+    def interior_angles(cls):
+        return (cls.sides - 2) * 180
+```
+
+The metaclass has access to the name of the class, the parent classes it inherits from (bases), and all the class
+attributes that were defined in the class's body. In the above example, If I try to define a polygon with fewer than
+three sides, the validation will cause the class statement to fail immediately after the class statement body (the
+program will not even be able to start running when I define such a class). Python 3.6 introduced simplified syntax
+to accomplish this: the _\__init_subclass___ special class method:
+
+```python
+class APolygon:  # This produces the same effect than the ValidatePoligon Class
+    sides = None  # Must be specified by subclasses
+
+    def __init_subclass__(cls):
+        super().__init_subclass__()
+        if cls.sides < 3:
+            raise ValueError('Polygons need 3+ sides')
+
+    @classmethod
+    def interior_angles(cls):
+        return (cls.sides - 2) * 180
+```
+
+One problem with the standard Python metaclass machinery is that you can only specify a single metaclass per class
+definition. It's possible to fix this by creating a complex hierarchy of metaclass type definitions to layer validation
+(having a validation classes to inherit from each others), but this approach ruins composability, which is often the
+purpose of class validation, if you want to apply one of the validations to another set of classes, you'll have to
+duplicate the code and make those classes have this new validation. The _\__init_subclass___ can be defined by multiple
+levels of a class hierarchy as long as the __super__ built-in function is used to call any parent or sibling
+_\__init_subclass___ definitions. It's even compatible with multiple inheritance (you can even use _\__init_subclass___
+in complex cases like diamond inheritance):
+
+```python
+class Filled:
+    color = None  # Must be specified by subclasses
+
+    def __init_subclass__(cls):
+        super().__init_subclass__()  # This enables validation in multiple layers of classes and multiple inheritance
+        if cls.color not in ('red', 'green', 'blue'):
+            raise ValueError('Fills need a valid color')
+
+
+class RedTriangle(Filled, Polygon):  # The validation is called for each one of the Metaclasses
+    color = 'red'
+    sides = 3
+```
+
+### Register Class Existence with __init_subclass__
+
+Another common use of metaclasses is to automatically register types in a program. Registration is useful for doing
+reverse lookups, where you need to map a simple identifier back to a corresponding class. Now imagine you want to use a
+serialization/deserialization hierarchy of classes using JSON:
+
+```python
+import json
+
+
+class Serializable:
+    def __init__(self, *args):
+        self.args = args
+
+    def serialize(self):
+        return json.dumps({'args': self.args})
+
+
+class Deserializable(Serializable):
+    @classmethod
+    def deserialize(cls, json_data):
+        params = json.loads(json_data)
+        return cls(*params['args'])
+
+
+class BetterPoint2D(Deserializable):
+    pass
+```
+
+The problem with the above is that you need to deserialize data like `BetterPoint2D.deserialize(data)` which requires
+you to know the intended type of the serialized data ahead of time instead of being able to deserialize any class back
+to its corresponding Python object. To solve this you can include the serialized object's class name in the JSON data:
+
+```python
+class BetterSerializable:
+    def __init__(self, *args):
+        self.args = args
+
+    def serialize(self):
+        return json.dumps({
+            'class': self.__class__.__name__,
+            'args': self.args,
+        })
+
+    def __repr__(self):
+        name = self.__class__.__name__
+        args_str = ', '.join(str(x) for x in self.args)
+        return f'{name}({args_str})'
+```
+
+And then maintain a mapping of class names back to constructors for those objects:
+
+```python
+registry = {}
+
+
+def register_class(target_class):
+    registry[target_class.__name__] = target_class
+
+
+def deserialize(data):
+    params = json.loads(data)
+    name = params['class']
+    target_class = registry[name]
+    return target_class(*params['args'])
+```
+
+But the problem is that to ensure that deserialize always works properly, you must call _\__register_class__ for every
+class I may want to deserialize in the future. This is error prone as you might forget this call, but there is a
+way to act on the programmer's intent to use the serialization code and ensure that _\__register_class__ is called in
+all cases. Metaclasses enable this by intercepting the class statement when subclasses are defined:
+
+```python
+class Meta(type):
+    def __new__(meta, name, bases, class_dict):
+        cls = type.__new__(meta, name, bases, class_dict)
+        register_class(cls)
+        return cls
+
+
+class RegisteredSerializable(BetterSerializable, metaclass=Meta):
+    pass
+```
+
+Or as seen before, the following can be used too (requires Python 3.6 or above):
+
+```python
+class BetterRegisteredSerializable(BetterSerializable):
+    def __init_subclass__(cls):
+        super().__init_subclass__()
+        register_class(cls)
+```
+
+### Annotate Class Attributes with __set_name__
+
+One more useful feature enabled by metaclasses is the ability to modify or annotate properties after a class is
+defined but before the class is actually used (commonly used with __descriptors__):
+
+```python
+class GenericDataBaseField:
+    def __init__(self, name):
+        self.name = name
+        self.internal_name = '_' + self.name
+
+    def __get__(self, instance, instance_type):
+        if instance is None:
+            return self
+        return getattr(instance, self.internal_name, '')
+
+    def __set__(self, instance, value):
+        setattr(instance, self.internal_name, value)
+```
+
+With the column name stored in the __GenericDataBaseField__ descriptor, I can save all of the per-instance state
+directly in the instance dictionary as protected fields by using the __setattr__ built-in function, and later I can load
+state with __getattr__. An example of this can be seen below:
+
+```python
+class Customer:
+    first_name = GenericDataBaseField('first_name')
+    last_name = GenericDataBaseField('last_name')
+    prefix = GenericDataBaseField('prefix')
+    suffix = GenericDataBaseField('suffix')
+```
+
+Notice how the left side is redundant with right side why I need to define the attribute name if it is passed in the
+GenericDataBaseField constructor? The problem is that the order of operations in the __Customer__ class definition
+is the opposite of how it reads from left to right. First, the __GenericDataBaseField__ constructor is called as
+`GenericDataBaseField('first_name')`. Then, the return value of that is assigned to `Customer.field_name`. There's no
+way for a __GenericDataBaseField__ instance to know upfront which class attribute it will be assigned to. You can
+eliminate this redundancy using a metaclass, which let you hook the class statement directly and take action as soon as
+a class body is finished:
+
+```python
+class Meta(type):
+    def __new__(meta, name, bases, class_dict):
+        for key, value in class_dict.items():
+            if isinstance(value, NewGenericDataBaseField):
+                value.name = key
+                value.internal_name = '_' + key
+        cls = type.__new__(meta, name, bases, class_dict)
+        return cls
+
+
+# All classes representing database rows should inherit from this class to ensure that they use the metaclass
+class DatabaseRow(metaclass=Meta):
+    pass
+
+
+class NewGenericDataBaseField:
+    def __init__(self):
+        # These will be assigned by the metaclass.
+        self.name = None
+        self.internal_name = None
+
+    def __get__(self, instance, instance_type):
+        if instance is None:
+            return self
+        return getattr(instance, self.internal_name, '')
+
+    def __set__(self, instance, value):
+        setattr(instance, self.internal_name, value)
+
+
+class BetterCustomer(DatabaseRow):
+    first_name = Field()
+    last_name = Field()
+    prefix = Field()
+    suffix = Field()
+```
+
+As it can be seen, __NewGenericDataBaseField__ no longer requires arguments to be passed to its constructor, eliminating
+the redundancy of the field name definition. Instead, its attributes are set by the `Meta.__new__` method. The problem
+here is that you need to make sure that your database row representation always inherits from __DatabaseRow__. This
+problem can be solved by using the _\__set_name___ special method for descriptors. This method (Python 3.6 and above),
+is called on every descriptor instance when its containing class is defined. It receives as parameters the owning
+class that contains the descriptor instance and the attribute name to which the descriptor instance was assigned:
+
+```python
+class FinalVersionDataBaseField:
+    def __init__(self):
+        self.name = None
+        self.internal_name = None
+
+    def __set_name__(self, owner, name):  # Called on class creation for each descriptor
+        self.name = name
+        self.internal_name = '_' + name
+
+    def __get__(self, instance, instance_type):
+        if instance is None:
+            return self
+        return getattr(instance, self.internal_name, '')
+
+    def __set__(self, instance, value):
+        setattr(instance, self.internal_name, value)
+
+
+class FixedCustomer:
+    first_name = FinalVersionDataBaseField()
+    last_name = FinalVersionDataBaseField()
+```
+
+With this approach, you can avoid memory leaks and the weakref built-in module by having descriptors store data they
+manipulate directly within a class's instance dictionary.
+
+### Prefer Class Decorators Over Metaclasses for Composable Class Extensions
+
+Imagine you want to decorate all of the methods of a class with a helper that prints arguments, return values, and
+exceptions raised:
+
+```python
+from functools import wraps
+
+
+def trace_func(func):
+    if hasattr(func, 'tracing'):  # Only decorate once
+        return func
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        result = None
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except Exception as e:
+            result = e
+            raise
+        finally:
+            print(f'{func.__name__}({args!r}, {kwargs!r}) -> '
+                  f'{result!r}')
+
+    wrapper.tracing = True
+    return wrapper
+```
+
+And then use this decorator in a class:
+
+```python
+class TraceDict(dict):
+    @trace_func
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @trace_func
+    def __setitem__(self, *args, **kwargs):
+        return super().__setitem__(*args, **kwargs)
+
+    @trace_func
+    def __getitem__(self, *args, **kwargs):
+        return super().__getitem__(*args, **kwargs)
+```
+
+But as it can be seen this is quite cumbersome because you have to redefine all the methods that I wanted to decorate
+with __@trace_func__. Even worst, if a method is later added to the dict superclass, it won't be decorated unless I
+also define it in __TraceDict__. You can solve this problem is to use a metaclass to automatically decorate all methods
+of a class (implemented here by wrapping each function or method in the new type with the __trace_func__ decorator):
+
+```python
+import types
+
+trace_types = (
+    types.MethodType,
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.BuiltinMethodType,
+    types.MethodDescriptorType,
+    types.ClassMethodDescriptorType)
+
+
+class TraceMeta(type):
+    def __new__(meta, name, bases, class_dict):
+        klass = super().__new__(meta, name, bases, class_dict)
+        for key in dir(klass):
+            value = getattr(klass, key)
+            if isinstance(value, trace_types):
+                wrapped = trace_func(value)
+                setattr(klass, key, wrapped)
+        return klass
+
+
+class TraceDict(dict, metaclass=TraceMeta):
+    pass
+```
+
+The problem with this approach is that if you try to use __TraceMeta__ when a superclass already has specified a
+metaclass it fails as this new metaclass does not inherit from __TraceMeta__ (and you might not be able to modify it
+if you don't own the library where this new metaclass is). This metaclass approach puts too many constraints on the
+class that's being modified. To solve this problem, Python supports class decorators. Class decorators work just like
+function decorators: They're applied with the __@__ symbol prefixing a function before the class declaration. The func-
+tion is expected to modify or re-create the class accordingly and then return it:
+
+```python
+def trace(klass):
+    for key in dir(klass):
+        value = getattr(klass, key)
+        if isinstance(value, trace_types):
+            wrapped = trace_func(value)
+            setattr(klass, key, wrapped)
+    return klass
+
+
+@trace
+class MyClass:
+    pass
+```
+
+A class decorator is a simple function that receives a class instance as a parameter and returns either a new class or a
+modified version of the original class, and they also work when the class being decorated already has a metaclass.
 
 ## Chapter 7: Concurrency and Parallelism<a name="Chapter7"></a>
 
