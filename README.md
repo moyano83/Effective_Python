@@ -2225,6 +2225,582 @@ modified version of the original class, and they also work when the class being 
 
 ## Chapter 7: Concurrency and Parallelism<a name="Chapter7"></a>
 
+### Use subprocess to Manage Child Processes
+
+Python is a feasible alternative when existing shell scripts get complicated, for the sake of readability and
+maintainability. Python has many ways to run subprocesses, but the best choice for managing child processes is to use
+the subprocess built-in module:
+
+```python
+import subprocess
+
+result = subprocess.run(['echo', 'Hello from the child!'], capture_output=True, encoding='utf-8')
+result.check_returncode()  # No exception means clean exit
+print(result.stdout)  # Prints 'Hello from the child!'
+```
+
+Child processes run independently from their parent process(the Python interpreter), which decouples the child process
+from the parent frees up the parent process to run many child processes in parallel. If I create a subprocess using the
+_Popen_ class instead of the run function, I can poll child process status periodically while Python does other work:
+
+```python
+proc = subprocess.Popen(['sleep', '1'])
+while proc.poll() is None:
+    print('Working...')
+```
+
+You can also pipe data from a Python program into a subprocess and retrieve its output.
+
+```python
+import os, subprocess
+
+
+def run_encrypt(data):
+    env = os.environ.copy()
+    env['password'] = 'zf7ShyBhZOraQDdE/FiZpm/m/8f9X+M1'
+    proc = subprocess.Popen(
+        ['openssl', 'enc', '-des3', '-pass', 'env:password'],  # sequence of program arguments
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE)
+    proc.stdin.write(data)
+    proc.stdin.flush()  # Ensure that the child gets input
+    return proc
+
+
+procs = []
+for _ in range(3):
+    data = os.urandom(10)
+    proc = run_encrypt(data)  # piping random bytes into the encryption function
+    procs.append(proc)
+
+for proc in procs:
+    out, _ = proc.communicate()  # Sends data to stdin. Read data from stdout and stderr, until end-of-file is reached
+    print(out[-10:])
+```
+
+It's also possible to create chains of parallel processes, just like UNIX pipelines, connecting the output of one child
+process to the input of another:
+
+```python
+import subprocess
+
+encrypt_procs = []
+hash_procs = []
+for _ in range(3):
+    data = os.urandom(100)
+    encrypt_proc = run_encrypt(data)
+    encrypt_procs.append(encrypt_proc)
+    hash_proc = run_hash(encrypt_proc.stdout)  # Other function that hashes the given input
+    hash_procs.append(hash_proc)
+    # Ensure that the child consumes the input stream and the communicate() method doesn't inadvertently steal
+    # input from the child. Also lets SIGPIPE propagate to the upstream process if the downstream process dies.
+    encrypt_proc.stdout.close()
+    encrypt_proc.stdout = None
+
+for proc in encrypt_procs:
+    try:
+        proc.communicate(timeout=0.1)  # causes an exception if the child process hasn't finished within the time period
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        proc.wait()
+    print('Exit status', proc.poll())
+```
+
+### Use Threads for Blocking I/O, Avoid for Parallelism
+
+The standard implementation of Python is called CPython, which runs a Python program in two steps: First, it
+parses and compiles the source text into bytecode, which is a low-level representation of the program as 8-bit
+instructions and then runs the bytecode using a stack-based interpreter.The bytecode interpreter has state that must be
+maintained and coherent while the Python program executes. CPython enforces coherence with a mechanism called the global
+interpreter lock (GIL). GIL is a mutual-exclusion lock (mutex) that prevents CPython from being affected by preemptive
+multithreading, where one thread takes control of a program by interrupting another thread. The downside of this
+mechanism is that GIL causes only one of the multiple available threads of execution to ever make forward progress at a
+time.
+
+```python
+from threading import Thread
+
+
+class SomeThread(Thread):
+    def __init__(self, arg1):
+        super().__init__()
+        self.arg1 = arg1
+
+    def run(self):
+        self.factors = list(some_function(self.arg1))
+
+
+threads = []
+for arg in [2139079, 1214759, 1516637, 1852285]:
+    thread = SomeThread(arg)
+    thread.start()
+    threads.append(thread)
+
+for thread in threads:
+    thread.join()
+```
+
+The above code might take longer than just executing the `some_function` function within a for loop in the main script
+due to the effects of GIL. There are ways to get CPython to utilize multiple cores, but they don't work with the
+standard Thread class, so what's the reason for this class? Because multiple threads make it easy for a program to seem
+like it's doing multiple things at the same time and to deal with blocking I/O, which happens when Python does certain
+types of system calls. Threads help handle blocking I/O by insulating a program from the time it takes for the operating
+system to respond to requests. If you need to do blocking I/O and computation simultaneously, consider moving your
+system calls to threads. GIL prevents Python code from running in parallel, but doesn't have an effect on system calls.
+This is because Python threads release the GIL just before they make system calls, and they reacquire the GIL as
+soon as the system calls are done.
+
+### Use Lock to Prevent Data Races in Threads
+
+The fact that GIL prevents Python threads from running on multiple CPU cores in parallel doesn't mean that it also acts
+as a lock for a program's data structures. This is because a thread's operations on data structures can be interrupted
+between any two bytecode instructions in the Python interpreter, which is dangerous if you access the same objects from
+multiple threads simultaneously. This is specially dangerous on assignments such as `a+=1` due to python dividing this
+instruction into: get 'a' value, create intermediate result with `result=a+1` and then assigning this result to 'a'. The
+Thread doing this op might be interrupted just after the assignment creating race conditions. To avoid this, you can use
+The _Lock_ class from the _threading_ module:
+
+```python
+from threading import Lock
+
+
+class LockingCounter:  # Implementation of a secure Lock counter mechanism
+    def __init__(self):
+        self.lock = Lock()
+        self.count = 0
+
+    def increment(self, offset):
+        with self.lock:
+            self.count += offset
+```
+
+### Use Queue to Coordinate Work Between Threads
+
+One of the most useful arrangements for concurrent work is a pipeline of functions. To create this arrangement, you need
+a way to hand off work between the pipeline phases, which can be modeled as a thread-safe producer–consumer queue:
+
+```python
+from collections import deque
+from threading import Lock
+
+
+class MyQueue:
+    def __init__(self):
+        self.items = deque()
+        self.lock = Lock()
+
+    def put(self, item):
+        with self.lock:
+            self.items.append(item)
+
+    def get(self):
+        with self.lock:
+            return self.items.popleft()
+```
+
+To use the above queue with a thread, we need to properly handle the case where the input queue is empty because
+the previous phase hasn't completed its work yet. This happens where I catch the IndexError exception below:
+
+```python
+def run(self):
+    while True:  # Executes forever, there is no way to signal to a worker thread that it's time to exit
+        self.polled_count += 1
+        try:
+            item = self.in_queue.get()
+        except IndexError:
+            time.sleep(0.01)  # No work to do
+        else:
+            result = self.func(item)
+            self.out_queue.put(result)
+            self.work_done += 1
+```
+
+When the worker functions vary in their respective speeds, an earlier phase can prevent progress in later phases,
+backing up the pipeline. This causes later phases to starve and constantly check their input queues for new work in a
+tight loop. This is a waste of CPU time as workers are constantly raising and catching IndexError exceptions. Also
+a backup in the pipeline can cause the program to crash arbitrarily due to the fast phase queue constant increase in
+size. Fortunately there are better ways to implement this.
+
+#### Queue to the Rescue
+
+_Queue_ eliminates the busy waiting in the worker by making the get method block until new data is available.
+
+```python
+from queue import Queue
+from threading import Thread
+
+my_queue = Queue()
+
+
+def consumer():
+    my_queue.get()
+
+
+thread = Thread(target=consumer)
+thread.start()
+
+# Even though the thread is running first, it won't finish until an item is put on the Queue instance and the get 
+# method has something to return
+my_queue.put(object())  # Runs before get() above
+thread.join()
+```
+
+The _Queue_ class lets you specify the maximum amount of pending work to allow between two phases, which causes calls to
+put to block when the queue is already full. The _Queue_ class can also track the progress of work using the `task_done`
+method. This lets you wait for a phase's input queue to drain and removes the need to poll the last phase of a pipeline.
+
+```python
+def consumer():
+    work = in_queue.get()  # Runs Second 
+    # Doing work
+    in_queue.task_done()  # Runs Third
+
+
+thread = Thread(target=consumer)
+thread.start()
+
+in_queue.put(object())  # Runs first
+in_queue.join()  # Runs fourth
+thread.join()
+```
+
+Putting all of these together into a Queue subclass that also tells the worker thread when it should stop processing:
+
+```python
+from threading import Thread
+from queue import Queue
+
+
+class ClosableQueue(Queue):
+    SENTINEL = object()
+
+    def close(self):
+        self.put(self.SENTINEL)
+
+    def __iter__(self):
+        while True:
+            item = self.get()
+            try:
+                if item is self.SENTINEL:
+                    return  # Causes the thread to exit
+                yield item
+            finally:
+                self.task_done()  # To track progress on the work queue
+
+
+class StoppableWorker(Thread):
+    def __init__(self, func, in_queue, out_queue):
+        super().__init__()
+        self.func = func
+        self.in_queue = in_queue
+        self.out_queue = out_queue
+
+    def run(self):  # The thread will exit when the for loop is exhausted
+        for item in self.in_queue:
+            result = self.func(item)
+            self.out_queue.put(result)
+
+
+def input_function():
+    pass
+
+
+def transform_function():
+    pass
+
+
+input_queue = ClosableQueue()
+transform_queue = ClosableQueue()
+done_queue = ClosableQueue()
+threads = [
+    StoppableWorker(input_function, input_queue, transform_queue),
+    StoppableWorker(transform_function, transform_queue, done_queue)
+]
+
+for thread in threads:
+    thread.start()
+
+for _ in range(1000):
+    input_queue.put(object())
+# Send the stop signal after all the input work has been injected by closing the input queue of the first phase
+input_queue.close()
+# Wait for the work to finish by joining the queues that con- nect the phases.
+input_queue.join()
+# signal the next phase to stop by closing its input queue
+transform_queue.close()
+transform_queue.join()
+
+for thread in threads:
+    thread.join()
+```
+
+### Know How to Recognize When Concurrency Is Necessary
+
+The hardest type of change to handle is moving from a single-threaded program to one that needs multiple concurrent
+lines of execution. This is usually the case when there are I/O operations involved. The process of spawning a
+concurrent line of execution for each unit of work is called fan-out and waiting for all of those concurrent units
+of work to finish before moving on to the next phase in a coordinated process is called fan-in. Python provides many
+built-in tools for achieving fan-out and fan-in with various trade-offs.
+
+### Avoid Creating New Thread Instances for On-demand Fan-out
+
+Threads are the natural first tool to reach for in order to do parallel I/O in Python, but they have significant
+downsides when you try to use them for fanning out to many concurrent lines of execution:
+
+    * Thread instances require special tools to coordinate with each other safely, making it harder to read and reason
+    * Threads require a lot of memory (8 MB per executing thread)
+    * Starting a thread is costly, and threads have a negative performance impact when they run due to context switching
+
+Also threads make it more difficult to deal with errors and exceptions, the _Thread_ class will independently catch any
+exceptions that are raised by the target function and then write their traceback to `sys.stderr`, leaving the code that
+created the Thread and called join unaffected. Given all of these issues, threads are not the solution if you need to
+constantly create and finish new concurrent functions.
+
+### Understand How Using Queue for Concurrency Requires Refactoring
+
+The next approach to try adding concurrent execution is to implement a threaded pipeline using the Queue class from the
+queue built-in module, instead of creating one thread per work unit, you can create a fixed number of worker threads
+upfront and have them do parallelized I/O as needed. But this takes a significant amount of work to refactor existing
+code to use _Queue_, especially when multiple stages of a pipeline are required. Using Queue fundamentally limits the
+total amount of I/O parallelism a program can leverage compared to alternative approaches provided by other built-ins.
+
+### Consider ThreadPoolExecutor When Threads Are Necessary for Concurrency
+
+Python includes the concurrent.futures built-in module, which provides the _ThreadPoolExecutor_ class. You can fan out
+work items by submitting a function to an executor that will be run in a separate thread. Later, I can wait for the
+result of all tasks in order to fan in:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+
+def submit_work(pool, items):
+    futures = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        for i in items:
+            future = pool.submit(some_func, *i)  # Fan out
+            futures.append(future)
+        for future in futures:
+            future.result()  # Fan in
+```
+
+The threads used for the executor can be allocated in advance, which means I don't have to pay the startup cost on each
+execution. _ThreadPoolExecutor_ automatically propagates exceptions back to the caller when the result method is
+called on the Future instance returned by the submit method.
+
+### Achieve Highly Concurrent I/O with Coroutines
+
+Python addresses the need for highly concurrent I/O with coroutines. Coroutines let you have a very large number of
+seemingly simultaneous functions in your Python programs. They're implemented using the async and await keywords along
+with the same infrastructure that powers generators. The cost of starting a coroutine is a function call. Once a
+coroutine is active, it uses less than 1 KB of memory until it's exhausted. Coroutines pause at each await
+expression and resume executing an async function after the pending awaitable is resolved:
+
+```python
+async def some_logic(state, args):
+    ...
+    # Do some input/output in here:
+    data = await my_socket.read(50)
+    ...
+
+
+import asyncio
+
+
+async def execute(items, args):
+    tasks = []
+    for x in items:
+        task = some_logic(x, *args)  # Fan out 
+        tasks.append(task)
+    await asyncio.gather(*tasks)  # Fan in
+    return some_result
+
+
+# Call the above with
+asyncio.run(execute(some_items, args))  # Run the event loop
+```
+
+Calling an async function doesn't immediately run that function. Instead, it returns a coroutine instance that can be
+used with an await expression at a later time (similar to yield in generators). The gather function from the asyncio
+built-in library causes fan-in. The await expression on gather instructs the event loop to run the coroutines
+concurrently and resume execution of the enclosing coroutine when all of them have been completed. No locks are required
+as all execution occurs within a single thread. The I/O is parallelized as part of the event loop provided by asyncio.
+If my requirements change and I also need to do I/O somewhere else, I can easily accomplish this by adding _async_
+and _await_ keywords to the existing functions and call sites instead of having to restructure everything as I would
+have had to do if I were using Thread or Queue instances.
+
+### Know How to Port Threaded I/O to asyncio
+
+[Asyncio library](https://docs.python.org/3/library/asyncio.html) has great features. Python provides asynchronous
+versions of for loops, with statements, generators, comprehensions, and library helper functions that can be used as
+drop-in replacements in coroutines. The asyncio built-in module makes it straightforward to port existing code that
+uses threads and blocking I/O over to coroutines and asynchronous I/O.
+
+### Mix Threads and Coroutines to Ease the Transition to asyncio
+
+To port a large program to asyncio, you usually do this sequentially which results in a mix of threads and coroutines.
+Asyncio provides built-in facilities to do this. To convert threaded code to coroutines there are two approaches,
+top-down or bottom-up. Top-down is useful when you maintain a lot of common modules that you use across many different
+programs. The concrete steps are:
+
+    1. Change a top function to use async def instead of def
+    2. Wrap all of its calls that do I/O—potentially blocking the event loop—to use asyncio.run_in_executor instead
+    3. Ensure that the resources or callbacks used by run_in_executor invocations are properly synchronized 
+       (using Lock or the asyncio.run_coroutine_threadsafe function)
+    4. Try to eliminate get_event_loop and run_in_executor calls by moving downward through the call hierarchy and 
+       converting intermediate functions and methods to coroutines following the first three steps
+
+A snippet on how to use this function is shown below:
+
+```python
+import asyncio
+
+
+def some_function_to_run_in_the_even_loop():
+    pass
+
+
+async def run_mix_threads_and_async(handles, some_file):  # Step 1 
+    loop = asyncio.get_event_loop()
+    with open(some_file, 'wb') as output:
+        async def write_async(data):
+            output.write(data)
+
+        def write(data):
+            coro = write_async(data)
+            future = asyncio.run_coroutine_threadsafe(coro, loop)  # eliminates the need for the Lock, Step 3
+            future.result()
+
+        tasks = []
+        for handle in handles:
+            task = loop.run_in_executor(None, some_function_to_run_in_the_even_loop, handle, write)  # Step 2
+            tasks.append(task)
+        await asyncio.gather(*tasks)
+```
+
+The first parameter to `run_in_executor` is the _ThreadPoolExecutor_ to run the `some_function_to_run_in_the_even_loop`
+in, _None_ means to run it using the default one.
+
+The bottom-up approach has four steps too:
+
+    1. Create a new asynchronous coroutine version of each leaf function that you're trying to port
+    2. Change the existing synchronous functions so they call the coroutine versions and run the event loop
+    3. Move up a level of the call hierarchy, make another layer of coroutines, and replace existing calls to 
+       synchronous functions with calls to the coroutines defined in step 1
+    4. Delete synchronous wrappers around coroutines created in step 2 as you stop requiring them
+
+To run that coroutine until it finishes, I need to create an event loop for each worker thread and then call its
+`run_until_complete` method. This method will block the current thread and drive the event loop until the worker
+coroutine exits:
+
+```python
+def some_function(handle, interval, write_func):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def write_async(data):
+        write_func(data)
+
+    coro = other_async_function(handle, interval, write_async)
+    loop.run_until_complete(coro)
+```
+
+The `run_until_complete` method of the asyncio event loop enables synchronous code to run a coroutine until it finishes.
+The `asyncio.run_coroutine_threadsafe` function provides the same functionality across thread boundaries. Together these
+help with bottom-up migrations to asyncio.
+
+### Avoid Blocking the asyncio Event Loop to Maximize Responsiveness
+
+In the example above, the open, close, and write calls for the output file handle happen in the main event loop.
+These operations all require making system calls to the program's host operating system, which may block the event
+loop for significant amounts of time and prevent other coroutines from making progress. Yo should migrate this
+operations to a thread safe version of them like the one below:
+
+```python
+from threading import Thread
+import asyncio
+
+
+class WriteThread(Thread):
+    def __init__(self, output_path):
+        super().__init__()
+        self.output_path = output_path
+        self.output = None
+        self.loop = asyncio.new_event_loop()
+
+    def run(self):
+        asyncio.set_event_loop(self.loop)
+        with open(self.output_path, 'wb') as self.output:
+            self.loop.run_forever()
+        # Run one final round of callbacks so the await on stop() in another event loop will be resolved.
+        self.loop.run_until_complete(asyncio.sleep(0))
+
+    async def real_write(self, data):
+        self.output.write(data)
+
+    async def write(self, data):
+        coro = self.real_write(data)
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        await asyncio.wrap_future(future)
+
+    # The following two functions allows this class to be run in with statements
+    async def __aenter__(self):
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.start)
+        return self
+
+    async def __aexit__(self, *_):
+        await self.stop()
+```
+
+The above class can be used like this:
+
+```python
+async def run_fully_async(handles, interval, output_path):
+    async with WriteThread(output_path) as output:
+        tasks = []
+        for handle in handles:
+            task = asyncio.create_task(coro)  # coro is some coroutine
+            tasks.append(task)
+        await asyncio.gather(*tasks)
+```
+
+### Consider concurrent.futures for True Parallelism
+
+The multiprocessing built-in module enables Python to utilize multiple CPU cores in parallel by running additional
+interpreters as child processes (each one with its own GIL). Each child has a link to the main process where it receives
+instructions to do computation and returns results:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+
+def main():
+    pool = ThreadPoolExecutor(max_workers=2)
+    results = list(pool.map(some_function, arguments_to_the_function))
+
+
+if __name__ == '__main__':
+    main()
+```
+
+In this code, _ProcessPoolExecutor_ does the following:
+
+    1. It takes each item from the arguments to map.
+    2. It serializes the item into binary data by using the pickle module
+    3. copies the serialized data from the main interpreter process to a child interpreter process over a local socket
+    4. It deserializes the data back into Python objects, using pickle in the child process
+    5. It runs the some_function on the input data in parallel with other child processes
+    6. It serializes the result back into binary data
+    7. It copies that binary data back through the socket
+    8. It deserializes the binary data back into Python objects in the parent process
+    9. It merges the results from multiple children into a single list to return
+
+The overhead of using multiprocessing via _ProcessPoolExecutor_ is high because of all the serialization and
+deserialization that must happen between the parent and child processes. So use it with tasks that doesn't share state
+and only a small amount of data must be transferred between the parent and child processes
+
 ## Chapter 8: Robustness and Performance<a name="Chapter8"></a>
 
 ## Chapter 9: Testing and Debugging<a name="Chapter9"></a>
