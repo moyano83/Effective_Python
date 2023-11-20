@@ -2803,6 +2803,450 @@ and only a small amount of data must be transferred between the parent and child
 
 ## Chapter 8: Robustness and Performance<a name="Chapter8"></a>
 
+Python includes many of the algorithms and data structures you need to achieve high performance.
+
+### Take Advantage of Each Block in try/except /else/finally
+
+There are four distinct times when you might want to take action during exception handling in Python. These are captured
+in the functionality of _try_, _except_, _else_, and _finally_ blocks.
+
+#### finally Blocks
+
+Use _try/finally_ when you want exceptions to propagate up but also want to run cleanup code even when exceptions occur.
+For example to close file handles, although you must call open before the try block because exceptions that occur when
+opening the file (like OSError if the file does not exist) should skip the _finally_ block entirely.
+
+#### else Blocks
+
+Use _try/except/else_ to make it clear which exceptions will be handled by your code and which exceptions will propagate
+up. When the try block doesn't raise an exception, the _else_ block runs. The _else_ block helps you minimize the
+amount of code in the _try_ block, which is good for isolating potential exception causes and improves readability.
+
+#### Everything Together
+
+Use _try/except/else/finally_ when you want to do it all in one compound statement. _try_ to perform the read
+operations and initialization, _else_ for the normal business case, _except_ to handle specific failure scenarios
+and _finally_ to perform any cleanup or closing operation.
+
+### Consider contextlib and with Statements for Reusable try/finally Behavior
+
+The with statement in Python is used to indicate when code is running in a special context:
+
+```python
+# Mutual exclusion lock example 
+from threading import Lock
+
+lock = Lock()
+
+with lock:
+    # Do something while maintaining an invariant
+    pass
+```
+
+The example above is equivalent to this _try/finally_ construction because the _Lock_ class properly enables the _with_
+statementL:
+
+```python
+from threading import Lock
+
+lock = Lock()
+
+lock.acquire()
+try:
+    pass
+finally:
+    lock.release()
+```
+
+The with statement version of this is clearly better. It's easy to make your objects and functions work in with
+statements by using the _contextlib_ built-in module. This module contains the _contextmanager_ decorator, which lets a
+simple function be used in with statements. For example:
+
+```python
+import logging
+from contextlib import contextmanager
+
+
+def my_function():
+    logging.debug('Some debug data')
+    logging.error('Error log here')
+    logging.debug('More debug data')
+
+
+# I can elevate the log level of this function temporarily by defining a context manager. This helper function boosts 
+# the logging severity level before running the code in the with block and reduces the logging severity level afterward
+
+@contextmanager
+def debug_logging(level):
+    logger = logging.getLogger()
+    old_level = logger.getEffectiveLevel()
+    logger.setLevel(level)
+    try:
+        yield  # This is the point at which the with block's contents will execute, exceptions here will be re-raised
+    finally:
+        logger.setLevel(old_level)
+
+
+with debug_logging(logging.DEBUG):
+    print('* Inside:')
+    my_function()
+
+my_function()  # The same function running outside the with block won't print debug messages:
+```
+
+#### Using with Targets
+
+The context manager passed to a with statement may also return an object, which is assigned to a local variable in the
+as part of the compound statement. This gives the code running in the with block the ability to directly interact with
+its context. To enable your own functions to supply values for as targets, all you need to do is yield a value from your
+context manager:
+
+```python
+import logging
+from contextlib import contextmanager
+
+
+@contextmanager
+def log_level(level, name):
+    logger = logging.getLogger(name)
+    old_level = logger.getEffectiveLevel()
+    logger.setLevel(level)
+    try:
+        yield logger
+    finally:
+        logger.setLevel(old_level)  # This restores the log level as soon as the with block exits
+
+
+# The value yielded by context managers is supplied to the as part of the with statement
+with log_level(logging.DEBUG, 'my-log') as logger:
+    logger.debug(f'This is a message for {logger.name}!')  # Logger is the one returned by log_level function
+    logging.debug('This will not print')  # The default logging level is still WARNING
+```
+
+### Use datetime Instead of time for Local Clocks
+
+If your program handles time, you'll probably find yourself converting time between UTC and local clocks for the sake of
+human understanding. Python provides two ways of accomplishing time zone conversions.
+
+#### The time Module
+
+The localtime function from the time built-in module lets you convert a UNIX timestamp to a local time that matches the
+host computer's time zone.
+
+```python
+import time
+
+local_tuple = time.localtime(1552774475)
+time_format = '%Y-%m-%d %H:%M:%S'
+time_str = time.strftime(time_format, local_tuple)
+print(time_str)  # Prints 2019-03-16 15:14:35
+
+time_tuple = time.strptime(time_str, time_format)  # In case we do the inverse operation
+utc_now = time.mktime(time_tuple)
+print(utc_now)  # prints 1552774475.0
+```
+
+To convert between timezones is a bit more complicated, Python lets you use these time zones through the time module if
+your platform supports it. _time_ module is platform-dependent and its behavior is determined by how the underlying C
+functions work with the host operating system. This makes the functionality of the time module unreliable in Python.
+
+#### The datetime Module
+
+_datetime_ can be used to convert from the current time in UTC to local time:
+
+```python
+from datetime import datetime, timezone
+
+now = datetime(2019, 3, 16, 22, 14, 35)
+now_utc = now.replace(tzinfo=timezone.utc)
+now_local = now_utc.astimezone()
+print(now_local)  # 2019-03-16 15:14:35-07:00
+
+time_str = '2019-03-16 15:14:35'
+now = datetime.strptime(time_str, time_format)
+time_tuple = now.timetuple()
+utc_now = time.mktime(time_tuple)
+print(utc_now)  # prints 1552774475.0
+```
+
+Unlike the time module, the _datetime_ module has facilities for reliably converting from one local time to another
+local time. However, _datetime_ only provides the logic for time zone operations with its _tzinfo_ class and methods
+(The Python default installation is missing time zone definitions besides UTC). To cover this gap, use the _pytz_ module
+which contains a full database of every time zone definition you might need.
+
+```python
+import pytz
+
+arrival_nyc = '2019-03-16 23:33:24'
+nyc_dt_naive = datetime.strptime(arrival_nyc, time_format)
+eastern = pytz.timezone('US/Eastern')
+nyc_dt = eastern.localize(nyc_dt_naive)
+utc_dt = pytz.utc.normalize(nyc_dt.astimezone(pytz.utc))  # always convert local times to UTC first
+print(utc_dt)  # prints 2019-03-17 03:33:24+00:00
+
+pacific = pytz.timezone('US/Pacific')
+sf_dt = pacific.normalize(utc_dt.astimezone(pacific))  # Then, convert to local times as a final step
+print(sf_dt)  # prints 2019-03-17 09:18:24+05:45
+```
+
+With _datetime_ and _pytz_, conversions are consistent across all environments, regardless of what operating system.
+
+### Make pickle Reliable with copyreg
+
+The pickle built-in module can serialize Python objects into a stream of bytes and deserialize bytes back into objects.
+Pickled byte streams shouldn't be used to communicate between untrusted parties, use it to pass Python objects between
+programs that you control over binary channels.
+
+```python
+import pickle
+
+program_state_path = 'game_state.bin'
+with open(program_state_path, 'wb') as f:
+    pickle.dump(program_state_path, f)
+
+with open(program_state_path, 'rb') as f:
+    program_state_after = pickle.load(f)
+print(program_state_after.__dict__)  # prints the contents of the object loaded
+```
+
+The problem with the previous approach is that if the class definition loaded changes, previous stored versions of
+the class that doesn't contain some attributes would skip them. You can fix this problems using the _copyreg_ module,
+which lets you register the functions responsible for serializing and deserializing Python objects.
+
+#### Default Attribute Values
+
+In the simplest case, you can use a constructor with default arguments and use that constructor with pickling:
+
+```python
+import copyreg
+
+
+class SomeState:
+    def __init__(self, attr1=0, attr2=4):
+        self.attr1 = attr1
+        self.attr2 = attr2
+
+
+def pickle_some_state(some_state):
+    kwargs = some_state.__dict__
+    # This turns some_state into a tuple of parameters for the copyreg module
+    # The returned tuple contains the function for unpickling and the parameters to pass to the unpickling function  
+    return unpickle_some_state, (kwargs,)
+
+
+def unpickle_some_state(kwargs):
+    return SomeState(**kwargs)
+
+
+# Now, I register these functions with the copyreg built-in module
+copyreg.pickle(SomeState, pickle_some_state)
+```
+
+With the above registration done, deserializing an old _SomeState_ object will result in valid game data instead of
+missing attributes. This works because `unpickle_some_state` calls the _SomeState_ constructor directly instead of using
+the pickle module's default behavior of saving and restoring only the attributes that belong to an object.
+
+#### Versioning Classes
+
+Sometimes you need to make backward-incompatible changes to your Python objects by removing fields. You can control
+this behaviour by adding a version parameter to the functions supplied to copyreg.
+
+```python
+def pickle_game_state(game_state):
+    kwargs = game_state.__dict__
+    kwargs['version'] = 2
+    return unpickle_some_state, (kwargs,)
+
+
+def unpickle_game_state(kwargs):
+    version = kwargs.pop('version', 1)
+    if version == 1:
+        del kwargs['attr1']  # explicitly removing the attribute from the dic
+    return SomeState(**kwargs)
+```
+
+#### Stable Import Paths
+
+Other issue you may encounter with pickle is breakage from renaming a class. But trying to deserialize an old class into
+the new definition of the class throwa an exception because the import path of the serialized object's class is
+encoded in the pickled data. I can specify a stable identifier for the function to use for unpickling an object, which
+allows me to transition pickled data to different classes with different names when it's deserialized:
+
+```python
+import copyreg
+
+
+class NewSomeState:  # renaming the SomeState class to NewSomeState and remove the old class from the program entirely
+    def __init__(self, attr1=0, attr2=0, attr3=5):
+        self.attr1 = attr1
+        self.attr2 = attr2
+        self.attr3 = attr3
+
+
+copyreg.pickle(NewSomeState, pickle_some_state)
+state = NewSomeState()
+serialized = pickle.dumps(state)
+```
+
+With this approach, the import path to `unpickle_some_state` is encoded in the serialized data instead of
+_NewSomeState_. Once I serialize data with a function, it must remain available on that import path for deserialization.
+
+### Use decimal When Precision Is Paramount
+
+The integer type in python produces incorrect results in certain situations due to the way the conversion between
+binary and decimal is computed. In these cases where it is important, use the Decimal class from the decimal
+built-in module instead.
+
+```python
+from decimal import Decimal
+
+rate = Decimal('1.45')
+seconds = Decimal(3 * 60 + 42)  # Represents 3 minutes 42 seconds
+cost = rate * seconds / Decimal(60)
+print(cost)  # prints 5.365
+```
+
+_Decimal_ instances can be given either a _str_ containing the number, or directly passing a _float_ or an _int_
+instance to the constructor. The _Decimal_ class has a built-in function for rounding to exactly the decimal place
+needed with the desired rounding behavior:
+
+```python
+from decimal import ROUND_UP
+
+rounded = cost.quantize(Decimal('0.01'), rounding=ROUND_UP)
+print(f'Rounded {cost} to {rounded}')
+```
+
+For representing rational numbers with no limit to precision, consider using the Fraction class from the fractions
+built-in module.
+
+### Profile Before Optimizing
+
+You shouldn't assumne Python's behaviors in its runtime performance, slowdowns in a Python program can be obscure.
+Instead, measure the performance of a program before you try to optimize it. Python provides a built-in _profiler_ for
+this. Python provides two built-in profilers: one that is pure Python (profile) and another that is a C-extension
+module (cProfile). The cProfile built-in module is better because of its minimal impact on the performance of your
+program while it's being profiled. The pure Python alternative imposes a high overhead that skews the results.
+
+```python
+from random import randint
+from cProfile import Profile
+from pstats import Stats
+
+max_size = 10 ** 4
+data = [randint(0, max_size) for _ in range(max_size)]
+test = lambda: some_function_to_test(data)
+
+profiler = Profile()
+profiler.runcall(test)
+
+stats = Stats(profiler)  # Stats extracts statistics about the performance
+stats.strip_dirs()
+stats.sort_stats('cumulative')
+stats.print_stats()
+```
+
+Some of the information returned includes:
+
+    * ncalls: number of calls to the function during the profiling period
+    * tottime: number of seconds spent executing the function, excluding time spent executing other functions it calls
+    * tottime percall: average number of seconds spent in the function each time it is called, excluding time spent 
+      executing other functions it calls. This is tottime divided by ncalls
+    * cumtime: cumulative number of seconds spent executing the function, including other function calls
+    * cumtime percall: average number of seconds spent in the function each time it is called, including time spent in 
+      all other functions it calls. This is cumtime divided by ncalls
+
+Sometimes you might find that a common utility function is responsible for the majority of execution time, but the
+default output from the profiler makes such a situation difficult to understand because it doesn't show that the utility
+function is called by many different parts of your program. Python profiler provides the `print_callers` method to show
+which callers contributed to the profiling information of each function.
+
+### Prefer deque for Producer–Consumer Queues
+
+A FIFO queue, also known as Producer-Consumer queue, is often implemented with a _List_ in python and using the `append`
+and `pop(0)` methods of the list. The problem with this approach is that the performance of the list decreases as
+the element stored on it increases. The reason for this is that the pop method needs to move every item in the list back
+an index, effectively reassigning the entire list's contents. Python provides the _deque_ class from the collections
+built-in module to solve this problem, which provides constant time operations for inserting or removing items from its
+beginning or end. Use the methods `deque.append(x)` and `deque.popleft()` to implement the FIFO queue, and get an
+instance of deque with `collections.deque`.
+
+### Consider Searching Sorted Sequences with bisect
+
+It's common to find yourself with a large amount of data in memory as a sorted list that you then want to search.
+Regardless of the data your specific program needs to process, searching for a specific value in a list takes linear
+time proportional to the list's length when you call the index method. If you're not sure whether the exact value you're
+searching for is in the list, then you may want to search for the closest index that is equal to or exceeds your goal
+value. You can use the bisect_left function from the bisect module to do an efficient binary search through any
+sequence of sorted items. The index it returns will either be where the item is already present in the list or where
+you'd want to insert the item in the list to keep it in sorted order:
+
+```python
+from bisect import bisect_left
+
+data = [....]
+index = bisect_left(data, 91234)  # Exact match
+assert index == 91234
+index = bisect_left(data, 91234.56)  # Closest match
+assert index == 91235
+```
+
+_bisect_ has a logaritmic performance and can be used with any python object that acts like a sequence.
+
+### Know How to Use heapq for Priority Queues
+
+Contrary to the FIFO queues, a priority queue orders the elements on the collection in order of relative importance.
+Using a list for this purpose is not ideal because there is a cost on sorting the whole list each time a new element
+is added. On top of this, a linear scan is needed each time an element needs to be removed as subsequent elements in
+the list needs to be reordered. Python has the built-in _heapq_ module that solves this problem:
+
+```python
+from heapq import heappush
+
+heappush(some_queue, the_element)  # Adds an element similar to append in a list
+```
+
+The heapq module requires items in the priority queue to be comparable and have a natural sort order (otherwise it
+raises an error). You can quickly give your class to be ordered this behavior by using the `total_ordering` class
+decorator from the _functools_ built-in module and implementing the `__lt__` special method. To create a _heap_ I
+can use the `sort` method in a list, or use the `heapq.heapify(unordered_list)`. To get the first element of a _heap_,
+use the `heapq.heappop(the_heap)` function.
+
+### Consider memoryview and bytearray for Zero-Copy Interactions with bytes
+
+Although Python isn't able to parallelize CPU-bound computation without extra effort, it is able to support
+high-throughput, parallel I/O in a variety of ways. Slicing a _bytes_ instance causes the underlying data to be copied,
+which takes CPU time. You can avoid this by using the Python's built-in _memoryview_ type, which exposes CPython's
+high-performance buffer protocol to programs:
+
+```python
+data = b'Some binary data to be sliced'
+view = memoryview(data)
+chunk = view[12:19]  # This does not make a copy of the underlying data
+```
+
+Imagine that you need to insert a chunk of binary data into a binary collection, you can use the `join` method to
+insert the data but it is very costly. Instead use _bytearray_ type in conjunction with _memoryview_. One limitation
+with bytes instances is that they are read-only and don't allow for individual indexes to be updated:
+
+```python
+my_bytes = b'hello'
+my_bytes[0] = b'\x79'  # This raises an Error
+# bytearray is like a mutable version of bytes that allows for arbitrary positions to be overwritten,it uses 
+# integers for its values instead of bytes
+my_array = bytearray(b'hello')
+my_array[0] = 0x79  # This works
+```
+
+A _memoryview_ can also be used to wrap a _bytearray_. When you slice such a _memoryview_, the resulting object can be
+used to assign data to a particular portion of the underlying buffer:
+
+```python
+my_array = bytearray(b'Some binary data')
+my_memory = memoryview(my_array)
+slice_memory = my_memory[3:13]
+```
+
 ## Chapter 9: Testing and Debugging<a name="Chapter9"></a>
 
 ## Chapter 10: Collaboration<a name="Chapter10"></a>
