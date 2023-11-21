@@ -3249,4 +3249,309 @@ slice_memory = my_memory[3:13]
 
 ## Chapter 9: Testing and Debugging<a name="Chapter9"></a>
 
+### Use repr Strings for Debugging Output
+
+The human-readable string for a value doesn't make it clear what the actual type and its specific composition are. When
+debugging a program, you almost always want the _repr_ version of an object. The _repr_ built-in function returns the
+printable representation of an object: `print(repr('6'))` prints `'6'`. This is equivalent to using the _'%r'_ format
+string with the _%_ operator or an f-string with the _!r_ type conversion. `eval(repr(something))` should equal
+`something`. However, the default implementation of repr for object subclasses isn't especially helpful, but if you
+have control of the class, you can define your own `__repr__` special method that returns a string containing the Python
+expression that re-creates the object:
+
+```python
+class SomeClass:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def __repr__(self):
+        return f'SomeClass({self.x!r}, {self.y!r})'
+```
+
+When you don't have control over the class definition, you can reach into the object's instance dictionary, which is
+stored in the `__dict__` attribute.
+
+### Verify Related Behaviors in TestCase Subclasses
+
+The canonical way to write tests in Python is to use the unittest built-in module. To define tests, you usually create
+a file named like the python file you want to test but appended '_test', and then import and extend the test classes
+as follows:
+
+```python
+# my_tests.py
+from unittest import TestCase, main  # Import test machinery
+from the_class_i_want_to_test import function_to_test  # Some class to test
+
+
+class UtilsTestCase(TestCase):
+    def test_case1(self):
+        self.assertEqual('Some Result', function_to_test(b'Some Result'))  # Some test cases
+    # Other test cases to follow
+
+
+if __name__ == '__main__':
+    main()  # function that triggers the testing
+```
+
+Tests are organized into _TestCase_ subclasses. Each test case is a method beginning with the word 'test'.If one test
+fails, the _TestCase_ subclass continues running the other test methods so you can get a full picture of the results.
+You can also run a single test with `python3 <python file> <Main class name>.<test name>`.
+The _TestCase_ class provides helper methods such as `assertEqual` or `assertTrue` which are better than the built-in
+`assert` statement because they print out the inputs and outputs to help you understand the failure reasons. There's
+also an `assertRaises` helper method for verifying exceptions that can be used as a context manager in with statements:
+
+```python
+def test_exception(self):
+    with self.assertRaises(SomeError):
+        method_that_raises_the_exception('some argument to the method')
+```
+
+You can define other helper methods in the same test class as long as their name doesn't start with 'test'. Use the
+fail method to clarify which assumption or invariant wasn't met.
+The _TestCase_ class also provides a `subTest` helper method that enables you to avoid boilerplate by defining multiple
+tests within a single test method:
+
+```python
+class DataDrivenTestCase(TestCase):
+    def test_good(self):
+        good_cases = [
+            (b'my bytes', 'my bytes'),
+            ('no error', b'no error'),  # This one will fail
+            ('other str', 'other str'),
+            ...
+        ]
+        for value, expected in good_cases:
+            with self.subTest(value):
+                self.assertEqual(expected, to_str(value))
+```
+
+### Isolate Tests from Each Other with setUp, tearDown, setUpModule, and tearDownModule
+
+Override the `setUp` and `tearDown` methods of a _TestCase_ subclass to have the test environment set up before test
+methods run (a.k.a. test harness):
+
+```python
+# environment_test.py
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import TestCase, main
+
+
+class EnvironmentTest(TestCase):
+    def setUp(self):
+        self.test_dir = TemporaryDirectory()
+        self.test_path = Path(self.test_dir.name)
+
+    def tearDown(self):
+        self.test_dir.cleanup()
+
+    def test_modify_file(self):
+        with open(self.test_path / 'data.bin', 'w') as f:
+            pass
+
+
+if __name__ == '__main__':
+    main()
+```
+
+For cases in which the test preparation can't be done for each test due to latency (for example database setup), the
+_unittest_ module also supports module-level test harness initialization. To use this define `setUpModule` and
+`tearDownModule` functions within the module containing the _TestCase_ classes:
+
+```python
+# integration_test.py
+from unittest import TestCase, main
+
+
+def setUpModule():
+    print('* Module setup')  # Called once before tests starts
+
+
+def tearDownModule():
+    print('* Module clean-up')  # Called once after tests ends
+
+
+class IntegrationTest(TestCase):
+    def setUp(self):
+        print('* Test setup')  # Called before each test
+
+    def tearDown(self):
+        print('* Test clean-up')  # called after each test
+
+    def test_end_to_end1(self):
+        pass
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### Use Mocks to Test Code with Complex Dependencies
+
+Use mocked functions and classes to simulate behaviors when it's too difficult or slow to use the real thing.Python has
+the `unittest.mock` built-in module for creating mocks and using them in tests. Using the spec parameter to Mock is
+especially useful when mocking classes because it ensures that the code under test doesn't call a misspelled method name
+by accident.
+
+```python
+from unittest.mock import Mock
+
+mock = Mock(spec=get_friends)
+
+expected = [('Victor', 1), ('David', 2), ('John', 3)]
+mock.return_value = expected
+
+
+def get_friends(some_database, lookup_key):
+    pass
+
+
+database = object()
+result = mock(database, 'Patrick')
+assert result == expected
+```
+
+The _Mock_ class creates a mock function. The return_value attribute of the mock is the value to return when it is
+called. The _spec_ argument indicates that the mock should act like the given object (function in this case).
+This verifies that the mock responded correctly, to verify that the code called the mock provided with the correct
+carguments use `assert_called_once_with` method, which verifies that a single call with exactly the given parameters was
+made `mock.assert_called_once_with(database, 'Patrick')`.If I supply the wrong parameters, an exception is raised,
+and any _TestCase_ that the assertion is used in fails. I can indicate that any value is okay for an argument by using
+the `unittest.mock.ANY` constant:
+
+```python
+from unittest.mock import ANY
+
+mock = Mock(spec=get_friends)
+# Some setup here
+mock.assert_called_with(ANY, 'Patrick')
+```
+
+The Mock class also makes it easy to mock exceptions being raised:
+
+```python
+class MyError(Exception):
+    pass
+
+
+mock = Mock(spec=get_friends)
+mock.side_effect = MyError('Whoops! Big problem')
+result = mock(database, 'Patrick')
+```
+
+How do I get the codebase to use the mocks inside functions? You can pass keyword argument functions to the method
+and inject the mocks there (very verbose), or you can use `unittest.mock.patch`. This family of functions temporarily
+reassigns an attribute of a module or class:
+
+```python
+from unittest.mock import patch
+
+...
+with patch('__main__.get_friends'):
+    print(f'Here {get_friends} would refer to the mock version of the method, not the real one')
+```
+
+_patch_ works for many modules, classes, and attributes. It can be used in with statements, as a function decorator, or
+in the setUp and tearDown methods of _TestCase_ classes. However, _patch_ doesn't work in all cases. Python won't let
+me modify classes defined in a C-extension module for example. For this cases, you can create a helper function calling
+the intended function or class, and mock this helper function instead or extract this function call into a keyed
+argument:
+
+```python
+from unittest.mock import DEFAULT  # This value indicates that I want a standard Mock instance created for each name
+
+with patch.multiple('__main__',
+                    autospec=True,  # generated mocks will adhere to the specification of the objects simulated
+                    get_time=DEFAULT,
+                    get_friends=DEFAULT):
+    now_func = Mock(spec=datetime.utcnow)
+    now_func.return_value = datetime(2019, 6, 5, 15, 45)
+    get_time.return_value = timedelta(hours=3)
+    get_friends.return_value = [('Victor', 1), ('David', 2), ('John', 3)]
+```
+
+### Encapsulate Dependencies to Facilitate Mocking and Testing
+
+One way to improve test readability is to use a wrapper object to encapsulate the underlying object interface
+instead of passing a real object that needs to be mocked. For example create a class with the method names of the
+database where some info is retrieved, and call that object's function instead.
+
+### Consider Interactive Debugging with pdb
+
+When you need to track specific cases that cause trouble, consider using Python's built-in interactive debugger. The
+easiest way to use the debugger is by modifying your program to directly initiate the debugger just before you think
+you'll have an issue worth investigating, and call the `breakpoint` function:
+
+```python
+def compute_smth(observed, ideal):
+    # implementation
+    breakpoint()  # Calling python3 <my_file.py> would execute the logic and pause the program here
+    # continue implementation
+```
+
+At the (Pdb) prompt, you can type in the names of local variables to see their values printed out, display a list of all
+local variables by calling the `locals` built-in function, import modules, inspect global state, construct new objects,
+run the help built-in function, and even modify parts of the running program. In addition, the debugger has a variety of
+special commands to control and understand program execution:
+
+    * where: Print the current execution call stack
+    * up: Move your scope up the execution call stack to the caller of the current function
+    * down: Move your scope back down the execution call stack one level
+
+You can use these five debugger commands to control the program's execution in different ways:
+
+    * step:  Run until the next line of execution in the program, and then return control back to the debugger
+    * next:  Run until the next line of execution in the current function, and then return control back to the debugger
+    * return:  Run until the current function returns, and then return control back to the debugger
+    * continue: Continue running until the next breakpoint is hit
+    * quit: Exit the debugger and end the program
+
+You can also call the debugger prompt by using post-mortem debugging. This enables you to debug a program after it 's
+already raised an exception and crashed. You can use the command line `python3 -m pdb -c continue <program path>` to run
+the program controlled by the _pdb_ module. The `continue` command tells _pdb_ to get the program started immediately.
+When the program hits a problem it automatically enters the interactive debugger and I can inspect the program state.
+You can also use post-mortem debugging after hitting an uncaught exception in the interactive Python interpreter by
+calling the `pm` function of the _pdb_ module (often in a single line like `import pdb; pdb.pm()`).
+
+### Use tracemalloc to Understand Memory Usage and Leaks
+
+Memory management in the default implementation of Python, CPython, uses reference counting. This ensures that as soon
+as all references to an object have expired, the referenced object is also cleared from memory, freeing up that space
+for other data. CPython also has a built-in cycle detector to ensure that self-referencing objects are eventually
+garbage collected. Most of the time you won't have to care about allocating or deallocating memory, but when you do,
+the first way to debug memory usage is to ask the gc built-in module to list every object currently known by the
+garbage collector:
+
+```python
+import gc
+
+found_objects = gc.get_objects()  # returns a class with information of the objects held in memory
+
+import my_wasteful_program
+
+hold_reference = my_wasteful_program.run()  # run exists in my_wasteful_program and executes the program itself
+found_objects = gc.get_objects()
+```
+
+The `get_objects` method does not tell you anything about how the objects were allocated. Python 3.4 introduced a new
+_tracemalloc_ built-in module for solving this problem. _tracemalloc_ makes it possible to connect an object back to 
+where it was allocated. You use it by taking before and after snapshots of memory usage and comparing them to see what's
+changed.
+
+```python
+# top_n.py
+import tracemalloc
+
+tracemalloc.start(10)  # Set stack depth
+time1 = tracemalloc.take_snapshot()
+import my_wasteful_program
+
+x = my_wasteful_program.run()
+time2 = tracemalloc.take_snapshot()
+stats = time2.compare_to(time1, 'lineno')  # Compare snapshots  
+
+print('Biggest offender is:\n'.join(stats[0].traceback.format())) # print out the full stack trace of each allocation
+```
+
 ## Chapter 10: Collaboration<a name="Chapter10"></a>
