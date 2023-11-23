@@ -1050,11 +1050,13 @@ except StopIteration:
 To use this in a function you can store the value provided by _send_ by using _yield_ and then act accordingly:
 
 ```python
-def wave_modulating(steps):
     amplitude = yield  # Receive initial amplitude
-    for step in range(steps):
-        output = amplitude * math.sin(step * (2 * math.pi / steps))
-        amplitude = yield output  # Receive next amplitude
+for step in range(steps):
+
+
+def wave_modulating(steps):
+    output = amplitude * math.sin(step * (2 * math.pi / steps))
+    amplitude = yield output  # Receive next amplitude
 ```
 
 But what if we want to chain multiple signals together in sequence? Using the _send_ instead of just yield would  
@@ -3535,23 +3537,320 @@ found_objects = gc.get_objects()
 ```
 
 The `get_objects` method does not tell you anything about how the objects were allocated. Python 3.4 introduced a new
-_tracemalloc_ built-in module for solving this problem. _tracemalloc_ makes it possible to connect an object back to 
+_tracemalloc_ built-in module for solving this problem. _tracemalloc_ makes it possible to connect an object back to
 where it was allocated. You use it by taking before and after snapshots of memory usage and comparing them to see what's
 changed.
 
 ```python
 # top_n.py
 import tracemalloc
+import my_wasteful_program
 
 tracemalloc.start(10)  # Set stack depth
 time1 = tracemalloc.take_snapshot()
-import my_wasteful_program
 
 x = my_wasteful_program.run()
 time2 = tracemalloc.take_snapshot()
 stats = time2.compare_to(time1, 'lineno')  # Compare snapshots  
 
-print('Biggest offender is:\n'.join(stats[0].traceback.format())) # print out the full stack trace of each allocation
+print('Biggest offender is:\n'.join(stats[0].traceback.format()))  # print out the full stack trace of each allocation
 ```
 
 ## Chapter 10: Collaboration<a name="Chapter10"></a>
+
+### Know Where to Find Community-Built Modules
+
+Python has a central [repository of modules](https://pypi.org) that you can install and use in your programs. Using
+_pip_ to install a new module is simple: `python3 -m pip install <package name>`. _pip_ is best used together with the
+built-in module _venv_ to consistently track sets of packages to install for your projects.
+
+### Use Virtual Environments for Isolated and Reproducible Dependencies
+
+_pip_ installs new packages in a global location. That causes all Python programs on your system to be affected by
+these installed modules, which can cause problems with transitive dependencies (check transitive dependencies on
+_pip_ with `python3 -m pip show <package_name>`). The solution to this problem is using a tool called _venv_, which
+provides virtual environments which allows you to create isolated versions of the Python environment.
+
+#### Using venv on the Command Line
+
+Each virtual environment must live in its own unique directory. Create an environment with `python3 -m venv <project>`.
+Activate a virtual environment by navigating to the environment folder and running `bin/activate`, which causes all of
+my environment variables to match the virtual environment and updates the command-line prompt to include the virtual
+environment name. The virtual environment I created with venv starts with no packages installed except for pip and
+_setuptools_. Install packages with the same command shown in the previous point. Use `bin/deactivate` to go back to
+the default system.
+
+#### Reproducing Dependencies
+
+To reproduce the development environment in another machine, use `python3 -m pip freeze` to save all of my explicit
+package dependencies into a file (by convention named _requirements.txt_). You can install all the dependencies in a
+different folder using `python3 -m pip install -r <path to the folder>  <requirements file>`. It's important to note
+that the specific version of Python you're using is not included in the _requirements.txt_ file.
+
+### Write Docstrings for Every Function, Class, and Module
+
+Python provides built-in support for attaching documentation to blocks of code, you can add documentation by providing a
+docstring immediately after the def statement of a function:
+
+```python
+def my_function(self):
+    """Attach the documentation for your function after the 3 double quotes"""
+    pass
+```
+
+You can retrieve the docstring from within the Python program by accessing the function's __doc__ special attribute.
+You can also use the built-in pydoc module from the command line to run a local web server that hosts all the Python
+documentation that's accessible to your interpreter `python3 -m pydoc -p <port number>`. Docstrings can be attached to
+functions, classes, and modules.
+
+#### Documenting Modules
+
+Each module should have a top-level docstring: A string literal that is the first statement in a source file
+describing the module purpose. The module docstring is also a jumping-off point where you can highlight important
+classes and functions found in the module.
+
+#### Documenting Classes
+
+Each class should have a class-level docstring. The first line is the single-sentence purpose of the class. Paragraphs
+that follow discuss important details of the class's operation.Important public attributes and methods of the class
+should be highlighted as well.
+
+#### Documenting Functions
+
+Each public function and method should have a docstring. Any return values should be mentioned. Any exceptions that
+callers must handle as part of the function's interface should be explained. If a function accepts a variable number
+of arguments, use `*args` and `**kwargs` in the documented list of arguments to describe their purpose. You should
+also document default values, if it is a generator describe what it yields and in case of an asynchronous coroutine
+explain when it will stop execution.
+
+#### Using Docstrings and Type Annotations
+
+Python now supports type annotations for a variety of purposes, making the docstrings redundant in some cases. Omit
+the information that's already present in type annotations from docstrings.
+
+### Use Packages to Organize Modules and Provide Stable APIs
+
+Reorganize a project structure and refactor the code might be necessary as the project size grows. You find yourself
+with so many modules that you need another layer in your program to make it understandable. Python provides _packages_
+for this purpose. Packages are modules that contain other modules. In most cases, packages are defined by putting an
+empty file named `__init__.py` into a directory. Once `__init__.py` is present, any other Python files in that directory
+will be available for import, using a path relative to the directory. The functionality provided by packages has two
+primary purposes in Python programs.
+
+#### Namespaces
+
+Packages help divide your modules into separate namespaces. You can have many modules with the same filename but
+different absolute paths that are unique, but this approach breaks when the functions, classes, or submodules
+defined in packages have the same names. Use the _as_ clause of the import statement to rename whatever you've imported
+for the current scope or access names by their highest unique module name (i.e. use `foo.bar.function(...)`).
+
+#### Stable APIs
+
+Packages provides strict, stable APIs for external consumers. You can provide stable functionality that doesn't change
+between releases by hiding your internal code organization from external users. This way, you can refactor and improve
+your package's internal modules without breaking existing users. Python can limit the surface area exposed to API
+consumers by using the `__all__` special attribute of a module or package. The value of `__all__` is a list of every
+name to export from the module as part of its public API. When consuming code executes `from foo import *`, only the
+attributes in `foo.__all__` will be imported from `foo`. If `__all__` isn't present in `foo`, then only public
+attributes (those without a leading underscore) are imported. You should avoid wildcard imports.
+
+### Consider Module-Scoped Code to Configure Deployment Environments
+
+A deployment environment is a configuration in which a program runs. Every program has at least one deployment
+environment: _the production environment_. Production environments often require many external assumptions that
+are hard to reproduce in development environments. The best way to work around such issues is to override parts of a
+program at startup time to provide different functionality depending on the deployment environment.
+
+### Define a Root Exception to Insulate Callers from APIs
+
+When you're defining a module's API, the exceptions you raise are just as much a part of your interface as the
+functions and classes you define. Python has a built-in hierarchy of exceptions for the language and standard library,
+but sometimes it is worth to define your own hierarchy of exceptions. I can do this by providing a root _Exception_
+in your module and having all other exceptions raised by that module inherit from the root exception. Having a root
+exception in a module makes it easy for consumers of an API to catch all the exceptions that were raised deliberately.
+Using root exceptions helps find bugs in an API module's code. If my code only deliberately raises exceptions that I
+define within my module's hierarchy, then all other types of exceptions raised by my module must be the ones that I
+didn't intend to raise. Over time, I might want to expand my API to provide more specific exceptions in certain
+situations, I can take API future-proofing further by providing a broader set of exceptions directly below the root
+exception.
+
+### Know How to Break Circular Dependencies
+
+Inevitably, while you're collaborating with others, you'll find a mutual interdependence between modules. This can lead
+to circular dependencies. When a module is imported, here's what Python actually does, in depth-first order:
+
+    * Searches for a module in locations from sys.path
+    * Loads the code from the module and ensures that it compiles 
+    * Creates a corresponding empty module object
+    * Inserts the module into sys.modules
+    * Runs the code in the module object to define its contents
+
+The problem with a circular dependency is that the attributes of a module aren't defined until the code for those
+attributes has executed (after step 5). But the module can be loaded with the import statement immediately after it's
+inserted into sys.modules (after step 4). There are three ways to break circular dependencies:
+
+#### Reordering Imports
+
+Change the order of imports, if I import the dependant module toward the bottom of my app, after the app module's
+other contents have run, the problem is solved. But this goes against the PEP 8 style guide of putting all imports
+at the beginning of your file. This approach is not recommended.
+
+#### Import, Configure, Run
+
+Have modules minimize side effects at import time. I can have my modules only define functions, classes, and
+constants and avoid actually running any functions at import time. Then, I have each module provide a configure function
+that I call once all other modules have finished importing. The purpose of configure is to prepare each module's state
+by accessing the attributes of other modules. This works well in many situations and enables patterns like dependency
+injection. But sometimes it can be difficult to structure your code so that an explicit configure step is possible.
+
+#### Dynamic Import
+
+Use an import statement within a function or method. This is called a dynamic import because the module import
+happens while the program is running, not while the program is first starting up and initializing its modules:
+
+```python
+def my_func():
+    import other_module  # Dynamic import
+    self.prop1 = other_module.prefs.get('prop1')
+```
+
+The difference with the previous approach is that it requires no structural changes to the way the modules are defined
+and imported. In general, it's good to avoid dynamic imports like this. The cost of the import statement is not
+negligible and can be especially bad in tight loops.
+
+### Consider warnings to Refactor and Migrate Usage
+
+When a codebase grows, you might need a way to notify and encourage the people that you collaborate with to refactor
+their code and migrate their API usage to the latest forms. Python provides the built-in warnings, which is a
+programmatic way to inform other programmers that their code needs to be modified due to a change to an underlying
+library that they depend on.
+
+```python
+if some_condition is None:
+    warnings.warn('Some Warning message', MyCustomWarning)
+```
+
+Warning would appear in the system error output. The `warnings.warn` function supports the stacklevel parameter,
+which makes it possible to report the correct place in the stack as the cause of the warning. It also lets me configure
+what should happen when a warning is encountered. One option is to make all warnings become errors with
+`warnings.simplefilter('error')` (useful in test). Use the `-W` error command-line argument to the Python
+interpreter or the _PYTHONWARNINGS_ environment variable to apply this policy. It might be useful to redirect
+warnings to the logs instead, for example in a production environment:
+
+```python
+import logging
+
+fake_stderr = io.StringIO()
+handler = logging.StreamHandler(fake_stderr)
+formatter = logging.Formatter('%(asctime)-15s WARNING] %(message)s')
+handler.setFormatter(formatter)
+logging.captureWarnings(True)
+logger = logging.getLogger('py.warnings')
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
+warnings.resetwarnings()
+warnings.simplefilter('default')
+warnings.warn('This will go to the logs output')
+```
+
+You can test warnings as well like this:
+
+```python
+with warnings.catch_warnings(record=True) as found_warnings:
+    found = require('my_arg', None, 'Warning message')
+    expected = 'Warning message'
+    assert found == expected
+```
+
+### Consider Static Analysis via typing to Obviate Bugs
+
+Python has introduced special syntax and the built-in [typing](https://docs.python.org/3.8/library/typing) module,
+which allow you to annotate variables, class fields, functions, and methods with type information. _typing_ allows to
+run static analysis tools to ingest a program's source code and identify where bugs are most likely to occur. there are
+multiple implementations of static analysis tools for Python that use _typing_. The most popular tools are
+[mypy](https://github.com/python/mypy), [pytype](https://github.com/google/pytype),
+[pyright](https://github.com/microsoft/pyright), and [pyre](https://pyre-check.org). An example of usage using mypy:
+`python3 -m mypy --strict example.py`. Parameter and variable type annotations are delineated with a colon. Return value
+types are specified with `->` type following the argument list:
+
+```python
+def subtract(a: int, b: int) -> int:  # Function annotation
+    return a - b
+```
+
+Type annotations can also be applied to classes and to ensure the proper collection type:
+
+```python
+from typing import Callable, List, TypeVar
+
+Value = TypeVar('Value')
+Func = Callable[[Value, Value], Value]  # akind to type function with same type for the 2 input parameters and return 
+
+
+def combine(func: Func[Value], values: List[Value]) -> Value:
+    assert len(values) > 0
+    result = values[0]
+    for next_value in values[1:]:
+        result = func(result, next_value)
+    return result
+
+
+Real = TypeVar('Real', int, float)
+
+
+def add(x: Real, y: Real) -> Real:
+    return x + y
+
+
+inputs = [1, 2, 3, 4j]  # Oops: included a complex number
+result = combine(add, inputs)
+assert result == 10
+```
+
+The typing module supports _option_ types, which ensure that programs only interact with values after proper null checks
+have been performed.
+
+```python
+from typing import Optional
+
+
+def get_or_default(value: Optional[int],
+                   default: int) -> int:
+    if value is not None:
+        return value
+    return value  # should have returned "default"
+```
+
+Exceptions are not included because Exceptions are not considered part of an interface's definition. _typing_ does
+not work particularly well with forward references:
+
+```python
+class FirstClass:
+    def __init__(self, value: SecondClass) -> None:  # Breaks cause second class hasn't been defined yet
+        self.value = value
+
+
+class SecondClass:
+    def __init__(self, value: int) -> None:
+        self.value = value
+```
+
+One workaround supported by these static analysis tools is to use a string as the type annotation that contains the
+forward reference. The string value is later parsed and evaluated to extract the type information to check:
+
+```python
+class FirstClass:
+    def __init__(self, value: 'SecondClass') -> None:  # OK
+        self.value = value
+```
+
+A better approach is to use `from __future__ import annotations`, which instructs the Python interpreter to completely
+ignore the values supplied in type annotations when the program runs. some of the best practices to keep in mind:
+
+    * It's going to slow you down if you try to use type annotations from the start when writing a new piece of code.
+      First write a version without annotations, then write tests, and then add type information where valuable.
+    * Type hints are most important at the boundaries of a codebase, such as an API
+    * Apply type hints to the most complex and error-prone parts of your codebase that aren't part of an API
+    * Include static analysis as part of your automated build and test system
+    * Run the type checker as you go to avoid a big backlog of errors 
+    * For small prgrams, ad-hoc code, legacy codebases, and prototypes, type hints might not be worth
